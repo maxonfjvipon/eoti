@@ -39,6 +39,3 @@ missing_docs = "warn"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-
-[dev-dependencies]
-serde_json = "1.0.151"

@@ -80,7 +80,7 @@ Flag:
 
 ## 3. Input: XMIR
 
-The checker reads EO's **`1-parse`** XMIR — the output of the parser stage, before assembly/transpilation. Each program is an XML document whose objects are `<o>` elements. The reader (`load_xmir` → `convert`) understands this vocabulary:
+The checker reads EO's **`1-parse`** XMIR — the output of the parser stage, before assembly/transpilation. Each program is an XML document whose objects are `<o>` elements. The reader (`xmir::load` → `convert`) understands this vocabulary:
 
 | XMIR construct | Meaning to the checker |
 | --- | --- |
@@ -170,8 +170,8 @@ Two outputs with different lifetimes:
 ```
 
 - `status` — the compiler gates on this one field (`errors` → stop before codegen; `ok` → proceed).
-- `severity` — `error` gates; `warning`/`info`/`hint` do not.
-- `code` — a stable machine string; the tool's real API. Starter taxonomy: `type/unknown-attribute`, `type/argument-mismatch`, `type/not-recovered`, `type/incomplete-dispatch`, `type/unsatisfiable-parameter`, `ref/dangling-forma`.
+- `severity` — `error` gates; `warning`/`info`/`hint` do not. A shape that cannot fit is an error. `type/incomplete-dispatch` is the one warning today, because a half-built object passes the shape check: it is a design smell, and a pass that could fail a build the shape check let through is a pass nobody could afford to turn on.
+- `code` — a stable machine string; the tool's real API. Emitted today: `type/unknown-attribute`, `type/argument-mismatch`, `type/not-recovered`, `type/incomplete-dispatch`, `ref/dangling-forma`, `ref/unbound-name`, `input/unreadable`. Designed, not yet emitted: `type/unsatisfiable-parameter` (§12).
 - `loc` — the `@loc`: stable across reformatting, links to type facts and enables IDE caching.
 - `range` — `line`/`pos` for placement and the `[L:P]` + caret rendering (done by the consumer).
 - `message` — one sentence with context, no trailing period.
@@ -200,7 +200,7 @@ The full design is in `docs/eo-type-inference.tex`. In brief:
 - **Constraint solver** — `constrain(lhs, rhs)` means "`lhs` must be usable as `rhs`". Each unknown (`Var`) collects lower bounds (things that flow in) and upper bounds (slots it flows out to); a `seen` set makes cyclic/recursive objects terminate.
 - **Levels (MLsub)** — each `Var` has a `level`. Formations **generalize** at their definition level and each use **instantiates** via `freshen`; `constrain` performs **extrusion** (lowering) when a deep variable meets a shallower one. This is what makes a reused object's *parameters* fresh per use while its *recursion and context* stay shared.
 - **Options / `⊥`** — `T?` (`Opt`) is a maybe-bottom value. The **option discipline**: plain dispatch on a `T?` is rejected; you must `recovered value alternative` (the `⊥`-eliminator: `∀A. A? → A → A`) or use `?.` (optional chaining, `FragileDispatch`). Chains stay `T?` until recovered.
-- **Incompleteness as fragility** (behind `--incomplete`) — an object that still has an unset void is treated as fragile; dispatching on it is flagged. This is the object-level rule (see §12).
+- **Incompleteness as fragility** (behind `--incomplete`) — an object that still has an unset void is treated as fragile; dispatching on it is flagged as a **warning**, never an error, because it passes the shape check. This is the object-level rule (see §12).
 - **Generics** — `A–F` type variables, read from `#5741` annotations (§8).
 - **Forma resolution** — a non-primitive atom return type is resolved to the *actual object's shape* via `@loc` (§9).
 
@@ -227,7 +227,7 @@ The last case is the crux of structural inference: a requirement is **accumulate
 
 One module per responsibility, in `src/`. Reading order — each leans only on the ones above it:
 
-- **`types.rs`** — the type vocabulary: `Var` (unknown, with `level`/bounds/`rec`), `Prim` (`bytes`), `Fun`, `Rec` (shape: `fields` + ordered `voids` + `alias`), `Opt` (`T?`). Also the built-ins — `bytes`/`number`/`string`/`bool`/`tuple`/`stdout`/`recovered` — of which the first three are mutually recursive and hand-modelled (§10). A clash is the type error.
+- **`types.rs`** — the type vocabulary: `Var` (unknown, with `level`/bounds/`knot`), `Fun`, `Rec` (shape: `fields` + ordered `voids` + `alias`), `Opt` (`T?`). Also the built-ins — `bytes`/`number`/`string`/`bool`/`tuple`/`stdout`/`recovered` — of which the first three are mutually recursive and hand-modelled (§10). A clash is the type error.
 - **`solver.rs`** — `constrain` (the heart, "lhs must be usable as rhs"; extrusion lives here), `freshen` (instantiate: copy variables deeper than a limit), the level computation, the record behind a receiver, seeing past single-lower-bound variables, and the caches that make cyclic `@` and recursive application terminate.
 - **`infer.rs`** — the walker: one branch per AST node, and ordering defs before expressions so forward references resolve. Holds the inference context: the current MLsub level, the records mid-inference (for monomorphic recursion), and whether an unknown name is a fresh unknown or a failure.
 - **`xmir.rs`** — the reader, and the AST it produces: a name, the literals, a formation with and without voids, apply, dispatch, optional-chaining dispatch (`?.`), fragile, recovered, an annotated atom (§8), and a forma reference resolved by `@loc` (§9). Reading the `#5741` annotations — one annotation to a type, an atom's whole signature to a `Rec` — lives here too.
@@ -253,9 +253,11 @@ EO atoms may declare types. In `.eo`:
 
 In XMIR these become attributes: the return signature on the `name="λ"` child as `atom="…"`; a void's own type as `type="…"` (trailing `?` = maybe-⊥); a callback void's argument types as `args="…"`. Values may be a generic letter `A–F`, `⊥`, a primitive (`Φ.bytes`), or any Φ-rooted path.
 
-The checker builds an atom's type straight from these (`_atom_sig`): generics `A–F` are shared across the whole atom via one map (so `recovered`'s `value:A?`, `alternative:A`, and return `A` are the *same* `A`), `?` becomes an `Opt`, a callback becomes a function over its argument types, a primitive becomes its built-in type, and any other path is resolved via `@loc` (§9).
+The checker builds an atom's type straight from these (`Engine::declared`): generics `A–F` are shared across the whole atom via one map (so `recovered`'s `value:A?`, `alternative:A`, and return `A` are the *same* `A`), `?` becomes an `Opt`, a callback becomes a function over its argument types, a primitive becomes its built-in type, and any other path is resolved via `@loc` (§9).
 
-Result: `recovered` infers `∀A. (A? -> (A -> A))` **from the XMIR** — no hard-coded signature.
+An atom counts as declared once it says anything inference could not have worked out alone: a return that quantifies, a void stating its own type, or a void saying what its callback is handed. That last one matters — every `args=` in the runtime sits on an atom whose return is a concrete forma (`chunk.read`, `bytes.slice`, `regex.compile`), so a reading that wanted a generic first would find none of them.
+
+Result: `recovered` infers `∀A. (A? -> (A -> A))` **from the XMIR** — no hard-coded signature; and `chunk.read`'s `cant-read` is `string -> A` rather than an unknown that takes anything.
 
 > These same annotations are also harvested, independently, into `atoms.csv` by EO's `MjAtomsTable` for a **runtime** return-type check (`AtomTyped`, opt-in via `-Deo.typing`). That is a *separate* mechanism (see §12/§14); this checker does not read `atoms.csv`.
 
@@ -265,16 +267,23 @@ Result: `recovered` infers `∀A. (A? -> (A -> A))` **from the XMIR** — no har
 
 Every `<o>` carries `loc="Φ.…"`, a stable graph path identifying the object from the root `Φ`. It survives reformatting (unlike `line`/`pos`), and — crucially — it lives in the **same namespace as formas**: a return type like `Φ.posix.return` is *also* a locator into the graph.
 
-The checker exploits this to resolve non-primitive return types to real shapes (`_resolve_loc`):
+The checker exploits this to resolve non-primitive return types to real shapes (`Engine::resolve`):
 
-1. `build_loc_index` indexes every `<o>` by `@loc`, and records top-level objects separately.
-2. For a forma `Φ.a.b.c`, `_toplevel_of` finds the longest top-level ancestor (`Φ.a`) plus the path down (`b.c`).
-3. It infers the ancestor (so the nested object's `ξ.ρ…` parent chain resolves), then `_project`s down the path.
+1. `xmir::locators` indexes every `<o>` by `@loc`, and records top-level objects separately.
+2. For a forma `Φ.a.b.c`, `Locs::ancestor` finds the longest top-level ancestor (`Φ.a`) plus the path down (`b.c`).
+3. It infers the ancestor (so the nested object's `ξ.ρ…` parent chain resolves), then `Engine::project`s down the path.
 4. The result is inferred **once** (memoized), generalizable, and **instantiated per use with `freshen`** (no re-inference blow-up, no cross-use over-constraint). Self-reference is cycle-guarded. It is **best-effort**: anything that cannot be typed in isolation falls back to opaque, so resolution never turns a passing check into a spurious failure.
 
 Effect (current runtime): `posix.return`/`win32.return` → `{code, output, called, @}`, `tuple` → `{tail, head, length, at, eq, with, empty}`, `chunk`, `i64`, `regex.pattern`, `regex.matched` all resolve — where before they were opaque "accepts anything".
 
-`@loc` also enables a **dangling-forma lint** with no inference at all: check that every forma (`atom=`/`type=`/`args=` that is a Φ-path) names an existing `@loc`. (This would have caught EO bug #5785, where `posix.@`/`win32.@` declared `/Q.return` — a root object that did not exist.)
+`@loc` also enables a **dangling-forma lint** with no inference at all: every forma (`atom=`/`type=`/`args=` that is a Φ-path) is itself a locator, so it can be held against the locators the input carries.
+
+It speaks only where the input can answer, which is the whole difficulty. A forma naming an object from a file nobody passed is *unknown*, not broken — checking one file alone must not fail a build over a `Φ.bool` that is simply elsewhere. So two shapes are faulted and nothing else:
+
+1. **Reaching into an object that is right here.** Some ancestor of the forma is a known locator, so the object it names would be too — `Φ.posix.nowhere` when `Φ.posix` is in the input.
+2. **Rooted at Φ when it meant the object declaring it.** The forma resolves once rooted at the object that claims it, which nothing but a dropped prefix explains. This is EO bug #5785 exactly: `posix.@`/`win32.@` declared `/Q.return`, a root object that did not exist, where `/Q.posix.return` did. The finding names what was meant.
+
+Anything else stays quiet — the same leniency the walker shows an unmodelled atom (§15), and for the same reason: a checker that invents an error is worse than one that misses it.
 
 ---
 
@@ -282,9 +291,9 @@ Effect (current runtime): `posix.return`/`win32.return` → `{code, output, call
 
 **Most atoms need no maintenance** — their return types are read from XMIR (§8/§9). You touch the hand-modeled tables only for the small set of *structurally* modeled built-ins.
 
-- **`_prims`** — the three mutually-recursive base objects (`bytes`, `number`, a `bool` value). Their full method shapes are hand-written because they are the ground truth `bytes` decorates.
-- **`ATOMS`** — a few polymorphic/special built-ins that cannot be read from a single forma: `recovered`, `dataized` (`∀A. A → bytes`), `stdout`, plus the base names.
-- **`_TYPES`/`_PRIM`** — name → built-in constructor maps.
+- **`Engine::prims`** — the three mutually-recursive base objects (`bytes`, `number`, a `bool` value). Their full method shapes are hand-written because they are the ground truth `bytes` decorates.
+- **`Engine::atom`** — a few polymorphic/special built-ins that cannot be read from a single forma: `recovered`, `dataized` (`∀A. A → bytes`), `stdout`, plus the base names.
+- **`Ground::named`** and **`xmir::primitive`** — name → built-in constructor maps.
 
 When the runtime grows and `--atoms` shows a new unmodelled primitive, add its shape here (or, better, ensure it carries a `#5741` annotation so no hand-editing is needed). Historically this was the only recurring upkeep (e.g. `string.printf`, `bytes.as-u8…as-u64`, `tuple.contains`, `number.power`).
 
@@ -296,9 +305,13 @@ When the runtime grows and `--atoms` shows a new unmodelled primitive, add its s
 
 - **Examples** — 13 hand-built accept/reject cases (including the ones that must be rejected and a recursive object that once made the solver loop). These are the minimal behavioral spec.
 - **Conformance suite** — the whole `eo-runtime` is the large test: it must type **153/153, 0 rejected** (whatever the current object count is), in well under a second. Any implementation in any language must produce identical verdicts on the examples and the runtime.
-- **The frozen contract** — `conformance/examples.json` records both: every example with the regression it guards, plus the whole-runtime verdict. It was frozen before the port began (§13's migration discipline) and `tests/conformance.rs` runs it. A new behavior is a row there first, then an implementation change.
+- **The frozen contract** — `conformance/examples.json` records both: every example with the regression it guards, plus the whole-runtime verdict. It was frozen before the engine existed, and `tests/conformance.rs` builds each example under the id the contract knows it by, so drift fails in **both** directions: a row nobody builds, and a tree that reaches the wrong verdict. Rejections are held to their `code` as well, since that is the part a consumer matches on. A new behavior is a row there first, then an implementation change.
+- **Fixtures** — `conformance/fixtures/*.xmir`, whose filename states the verdict, so the repository is testable without an EO checkout.
+- **The gate** — `tests/cli.rs` goes through the compiled binary, because the exit status and the JSON are the whole contract with a compiler and neither is exercised by calling the engine.
 
-Recommended CI: regenerate `1-parse` (§4), run the examples, run the full report, and assert `rejected == 0` and `examples == all`.
+Two invariants worth naming, both asserted: the incompleteness pass may only ever *add warnings* — if it could fail a build the shape check passed, nobody could afford to run it — and the whole runtime must stay clean under both passes.
+
+Recommended CI: regenerate `1-parse` (§4), then `EO_HOME=… cargo test`, which runs the contract, the fixtures, the gate and the whole-runtime baseline together.
 
 ---
 
@@ -315,8 +328,8 @@ Recommended CI: regenerate `1-parse` (§4), run the examples, run the full repor
 These were each a real bug; keep them in mind before touching the solver:
 
 1. A formation's recursion variable must live at the **body level** (`outer+1`), not the definition level. Otherwise tying the knot extrudes/de-generalizes its parameters and the checker misses real errors (unsoundness).
-2. Atoms and literals must be built at **level 0** (`_at0`). Otherwise extrusion storms (observed ~100k calls).
-3. `_level_of` must **skip `ρ`** (the parent link) consistently with `freshen`/extrusion — else a record can never be lowered below a deep parent and `constrain` spins forever.
+2. Atoms and literals must be built at **level 0** (`Solver::jump`). Otherwise extrusion storms (observed ~100k calls).
+3. `Solver::level_of` must **skip `ρ`** (the parent link) consistently with `freshen`/extrusion — else a record can never be lowered below a deep parent and `constrain` spins forever.
 4. `freshen` shares `ρ` and aliased primitives (does not copy them); resolution to a return *value* returns the object's **instance**, not its fillable formation.
 
 ---
@@ -368,7 +381,7 @@ Design paper: `docs/eo-type-inference.tex` (build with `pdflatex`; note Unicode 
 - **No union types yet.** Genuinely polymorphic atoms whose type needs `A|B` (`if`, `switch`, `tuple.at`) carry no annotation and stay as the checker infers them.
 - **Lenient on the unknown.** An unmodeled atom/name becomes a fresh unknown ("anything"): the checker never emits a *false* error, but it can *miss* one. `--atoms` shows what is unmodeled.
 - **Best-effort forma resolution.** An object that cannot be typed in isolation falls back to opaque rather than failing (see §9).
-- **Fragility features are partly flag-gated.** `?.`, the option discipline, and object-level incompleteness are implemented, but the incompleteness pass is behind `EO_INCOMPLETE` so the 153/153 shape baseline stays clean; `?.` is not yet EO surface syntax.
+- **Fragility features are partly flag-gated.** `?.`, the option discipline, and object-level incompleteness are implemented, but the incompleteness pass is behind `--incomplete` so the 153/153 shape baseline stays clean; `?.` is not yet EO surface syntax.
 
 ---
 
