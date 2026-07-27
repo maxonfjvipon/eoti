@@ -89,6 +89,8 @@
     "source": "eo-runtime/target/eo/1-parse",
     "objects": 153,
     "rejected": 0,
-    "note": "whatever the current object count is, none of it may be rejected"
+    "smells": 5,
+    "observed": "objectionary/eo at e57bb95771",
+    "note": "only `rejected` is asserted, and it must stay 0 whatever the object count grows to; `objects` and `smells` are the observed baseline, the latter from the second pass under EO_INCOMPLETE"
   }
 }
