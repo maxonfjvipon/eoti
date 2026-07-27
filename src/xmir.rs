@@ -11,11 +11,13 @@
 //! the receiver; bases are scope-qualified as `Φ.x`, `ξ.x` or `ξ.ρ.x`; and a
 //! literal is a primitive constructor applied to raw hex text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use roxmltree::{Document, Node as Elem};
+
+use crate::types::{Site, Spot};
 
 /// One node of the abstract syntax tree: the four moves, the literals, and the
 /// two failure forms.
@@ -65,7 +67,7 @@ pub enum Node {
         /// The attribute wanted.
         label: String,
         /// Where it was written.
-        line: Option<u32>,
+        site: Site,
     },
     /// Optional chaining: dispatch on a receiver that may be `⊥`, propagating
     /// that possibility rather than failing.
@@ -75,7 +77,7 @@ pub enum Node {
         /// The attribute wanted.
         label: String,
         /// Where it was written.
-        line: Option<u32>,
+        site: Site,
     },
     /// Mark a value as possibly `⊥`.
     Maybe(Box<Node>),
@@ -171,6 +173,88 @@ pub fn locators(paths: &[impl AsRef<Path>]) -> HashMap<String, Node> {
     found
 }
 
+/// A forma written somewhere, and where it was written. A forma is a locator
+/// into the object graph, so it can be checked against the graph without
+/// inferring anything.
+#[derive(Clone, Debug)]
+pub struct Forma {
+    /// The object it claims exists.
+    pub path: String,
+    /// Where the claim was made.
+    pub site: Site,
+}
+
+/// Every locator that exists, and every forma that claims one.
+///
+/// This is all the dangling-forma lint needs, and it needs no inference at all:
+/// a forma naming an object that is not there is a broken reference whatever
+/// its type would have been.
+#[derive(Debug, Default)]
+pub struct Survey {
+    /// Every `@loc` in the input.
+    pub known: HashSet<String>,
+    /// Every forma claimed by an `atom`, `type` or `args` annotation.
+    pub claimed: Vec<Forma>,
+}
+
+impl Survey {
+    /// The formas that name nothing.
+    #[must_use]
+    pub fn dangling(&self) -> Vec<&Forma> {
+        self.claimed
+            .iter()
+            .filter(|forma| !self.known.contains(&forma.path))
+            .collect()
+    }
+}
+
+/// Walk every object of every file, noting what exists and what is claimed.
+///
+/// Files that cannot be read are skipped, so one broken input does not stop the
+/// rest from being surveyed.
+pub fn survey(paths: &[impl AsRef<Path>]) -> Survey {
+    let mut found = Survey::default();
+    for path in paths {
+        let Ok(text) = fs::read_to_string(path.as_ref()) else {
+            continue;
+        };
+        let Ok(document) = Document::parse(&text) else {
+            continue;
+        };
+        for object in document.descendants().filter(|el| el.has_tag_name("o")) {
+            if let Some(loc) = object.attribute("loc") {
+                found.known.insert(loc.to_owned());
+            }
+            let here = site(object);
+            for annotation in ["atom", "type", "args"] {
+                let Some(text) = object.attribute(annotation) else {
+                    continue;
+                };
+                for claim in text.split_whitespace() {
+                    if let Some(path) = rooted(claim) {
+                        found.claimed.push(Forma {
+                            path,
+                            site: here.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The object a single annotation claims, when it claims one at all. A generic
+/// letter names no object, nor does `⊥`, nor does anything that is not rooted
+/// at `Φ`.
+fn rooted(claim: &str) -> Option<String> {
+    let core = claim.strip_suffix('?').unwrap_or(claim);
+    if generic(core) || core == "⊥" || !core.starts_with("Φ.") {
+        return None;
+    }
+    Some(core.to_owned())
+}
+
 /// The last segment of a scope-qualified base: `Φ.bool` to `bool`, `ξ.ρ.if` to
 /// `if`, `.eq` to `eq`.
 #[must_use]
@@ -226,17 +310,34 @@ fn forma(fqn: &str) -> Node {
 
 /// A self or parent relative path, dispatched segment by segment on `ξ`. `ρ` is
 /// the parent link, so `ξ.ρ.ρ.x` walks up twice, and `φ` is the decoratee.
-fn scope(base: &str, line: Option<u32>) -> Node {
+fn scope(base: &str, site: &Site) -> Node {
     let mut segments = base.split('.');
     let mut node = Node::Name(segments.next().unwrap_or("ξ").to_owned());
     for segment in segments {
         node = Node::Dispatch {
             obj: Box::new(node),
             label: if segment == "φ" { "@" } else { segment }.to_owned(),
-            line,
+            site: site.clone(),
         };
     }
     node
+}
+
+/// Where an element says it was written.
+fn site(el: Elem) -> Site {
+    Site {
+        at: el
+            .attribute("line")
+            .and_then(|text| text.parse().ok())
+            .map(|line| Spot {
+                line,
+                pos: el
+                    .attribute("pos")
+                    .and_then(|text| text.parse().ok())
+                    .unwrap_or(0),
+            }),
+        loc: el.attribute("loc").map(str::to_owned),
+    }
 }
 
 /// Set an attribute, replacing whatever was bound under that name before.
@@ -320,15 +421,15 @@ fn convert(el: Elem) -> Node {
             return literal;
         }
     }
-    let line = el.attribute("line").and_then(|text| text.parse().ok());
+    let here = site(el);
     let mut node = if base.starts_with('.') {
         Node::Dispatch {
             obj: Box::new(receiver.map_or(Node::Bytes, convert)),
             label: if name == "φ" { "@" } else { name }.to_owned(),
-            line,
+            site: here,
         }
     } else if base == "ξ" || base.starts_with("ξ.") {
-        scope(base, line)
+        scope(base, &here)
     } else {
         Node::Name(name.to_owned())
     };
@@ -368,10 +469,13 @@ mod tests {
 
     #[test]
     fn reads_a_dispatch_as_a_dispatch() {
-        let node = only(r#"<p><o base=".plus" line="7"><o base="Φ.number"/></o></p>"#);
+        let node = only(r#"<p><o base=".plus" line="7" loc="Φ.k.φ"><o base="Φ.number"/></o></p>"#);
         assert!(
-            matches!(node, Node::Dispatch { label, line, .. } if label == "plus" && line == Some(7)),
-            "a dispatch dont read back with its attribute and position"
+            matches!(node, Node::Dispatch { label, site, .. }
+                if label == "plus"
+                    && site.at.map(|at| at.line) == Some(7)
+                    && site.loc.as_deref() == Some("Φ.k.φ")),
+            "a dispatch dont read back with its attribute and where it was written"
         );
     }
 

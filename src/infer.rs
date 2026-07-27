@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::resolve::Locs;
 use crate::solver::{Clash, Solver};
-use crate::types::{Level, RecId, Type, TypeId, Types};
+use crate::types::{Level, RecId, Site, Type, TypeId, Types};
 use crate::xmir::{Kind, Node, generic, tail};
 
 /// What names are in scope, and what they stand for.
@@ -101,20 +101,20 @@ impl Engine {
                 self.solver.constrain(&mut self.types, applied, want)?;
                 Ok(result)
             }
-            Node::Dispatch { obj, label, line } => {
+            Node::Dispatch { obj, label, site } => {
                 let receiver = self.infer(obj, env)?;
                 if let Some(shortcut) = self.through(receiver, label) {
                     return Ok(shortcut);
                 }
                 let result = self.fresh();
-                let want = self.requirement(label, result, *line);
+                let want = self.requirement(label, result, site);
                 self.solver.constrain(&mut self.types, receiver, want)?;
                 Ok(result)
             }
-            Node::Fragile { obj, label, line } => {
+            Node::Fragile { obj, label, site } => {
                 let receiver = self.infer(obj, env)?;
                 let result = self.fresh();
-                let want = self.requirement(label, result, *line);
+                let want = self.requirement(label, result, site);
                 if let Type::Opt(inner) = self.types.at(self.peek(receiver)) {
                     self.solver.constrain(&mut self.types, inner, want)?;
                     return Ok(self.types.opt(result));
@@ -165,7 +165,7 @@ impl Engine {
                     _ => None,
                 }
             }
-            Type::Fun { .. } | Type::Opt(_) | Type::Prim(_) => None,
+            Type::Fun { .. } | Type::Opt(_) => None,
         }
     }
 
@@ -180,7 +180,7 @@ impl Engine {
             .ok_or_else(|| Clash::UnknownAttribute {
                 attribute: seg.to_owned(),
                 receiver: ty,
-                line: None,
+                site: Site::default(),
             })
     }
 
@@ -300,12 +300,10 @@ impl Engine {
 
     /// A one-attribute requirement, remembering where it was written so a
     /// failure can be pointed at.
-    fn requirement(&mut self, label: &str, result: TypeId, line: Option<u32>) -> TypeId {
+    fn requirement(&mut self, label: &str, result: TypeId, site: &Site) -> TypeId {
         let want = self.types.rec(Vec::new());
         self.types.bind(want, label, result);
-        if let Some(line) = line {
-            self.types.mark(want, line);
-        }
+        self.types.mark(want, site.clone());
         self.types.node(Type::Rec(want))
     }
 

@@ -4,6 +4,7 @@
 //! file format: they are the minimal behavioral spec the paper argues for.
 
 use eoti::infer::{Engine, Env};
+use eoti::types::Site;
 use eoti::xmir::Node;
 
 fn name(what: &str) -> Node {
@@ -14,7 +15,7 @@ fn dot(obj: Node, label: &str) -> Node {
     Node::Dispatch {
         obj: Box::new(obj),
         label: label.to_owned(),
-        line: None,
+        site: Site::default(),
     }
 }
 

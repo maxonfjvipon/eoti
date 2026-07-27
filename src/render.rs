@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::solver::Clash;
 use crate::types::{Type, TypeId, Types, VarId};
 
 /// The character that brackets a placeholder while a type is being laid out. It
@@ -26,6 +27,46 @@ pub fn show(types: &Types, ty: TypeId) -> String {
         counts: Vec::new(),
     }
     .whole(ty)
+}
+
+/// A failure, said in one sentence.
+///
+/// The solver deliberately builds no prose, so this is where a clash becomes
+/// something a person reads. It stays one sentence with the context in it and no
+/// trailing stop, because a consumer may put it anywhere.
+#[must_use]
+pub fn explain(types: &Types, clash: &Clash) -> String {
+    match clash {
+        Clash::UnknownAttribute {
+            attribute,
+            receiver,
+            ..
+        } => format!("no attribute `{attribute}` on {}", show(types, *receiver)),
+        Clash::NotRecovered => {
+            "value can be ⊥, so it has to be recovered before anything is dispatched on it"
+                .to_owned()
+        }
+        Clash::IncompleteDispatch {
+            unset, attribute, ..
+        } => format!(
+            "attribute `{unset}` is not set, so `{attribute}` cannot be dispatched on this object"
+        ),
+        Clash::NoAttributes { value, wanted } => format!(
+            "{} has no attributes, but {} was wanted",
+            show(types, *value),
+            wanted
+                .iter()
+                .map(|label| format!("`{label}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Clash::Mismatch { value, wanted } => format!(
+            "cannot use {} as {}",
+            show(types, *value),
+            show(types, *wanted)
+        ),
+        Clash::Unbound { name } => format!("nothing is known about `{name}`"),
+    }
 }
 
 /// A rendering in progress.
@@ -69,7 +110,6 @@ impl Printer<'_> {
     fn layout(&mut self, ty: TypeId) -> String {
         let types = self.types;
         match types.at(ty) {
-            Type::Prim(_) => "bytes".to_owned(),
             Type::Opt(value) => format!("{}?", self.layout(value)),
             Type::Fun { arg, ret } => {
                 format!("({} -> {})", self.layout(arg), self.layout(ret))

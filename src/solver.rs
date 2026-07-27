@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::types::{Level, RecId, Type, TypeId, Types, VarId};
+use crate::types::{Level, RecId, Site, Type, TypeId, Types, VarId};
 
 /// A real type error: two shapes that cannot fit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub enum Clash {
         /// The receiver that lacks it.
         receiver: TypeId,
         /// Where the dispatch was written.
-        line: Option<u32>,
+        site: Site,
     },
     /// A value that may be `⊥` met a requirement needing it to be definite.
     NotRecovered,
@@ -34,7 +34,7 @@ pub enum Clash {
         /// The attribute the dispatch asked for.
         attribute: String,
         /// Where the dispatch was written.
-        line: Option<u32>,
+        site: Site,
     },
     /// A shape was wanted where the value carries no attributes at all.
     NoAttributes {
@@ -338,23 +338,18 @@ impl Solver {
                 if let Some(mine) = types.field(have, &label) {
                     self.fit(types, mine, wanted, seen)?;
                 } else if let Some(decoratee) = types.field(have, "@") {
-                    let line = types.line(want);
-                    let need = self.need(types, &label, wanted, line);
+                    let site = types.site(want).clone();
+                    let need = self.need(types, &label, wanted, &site);
                     self.fit(types, decoratee, need, seen)?;
                 } else {
                     return Err(Clash::UnknownAttribute {
                         attribute: label,
                         receiver: lhs,
-                        line: types.line(want),
+                        site: types.site(want).clone(),
                     });
                 }
             }
             return Ok(());
-        }
-        if let (Type::Prim(have), Type::Prim(want)) = (left, right) {
-            if have == want {
-                return Ok(());
-            }
         }
         if let Type::Rec(want) = right {
             return Err(Clash::NoAttributes {
@@ -419,7 +414,6 @@ impl Solver {
                 let value = self.copy(types, limit, value, memo);
                 types.opt(value)
             }
-            Type::Prim(_) => ty,
         }
     }
 
@@ -484,7 +478,6 @@ impl Solver {
                 let value = Self::sink(types, value, level, positive, memo);
                 types.opt(value)
             }
-            Type::Prim(_) => ty,
         }
     }
 
@@ -492,7 +485,7 @@ impl Solver {
     /// rebuilt. Reuse is what lets a cyclic decoratee chain terminate: the same
     /// requirement comes back as the same record, so the knot-tying set
     /// recognises it instead of chasing fresh copies.
-    fn need(&mut self, types: &mut Types, label: &str, want: TypeId, line: Option<u32>) -> TypeId {
+    fn need(&mut self, types: &mut Types, label: &str, want: TypeId, site: &Site) -> TypeId {
         let node = if let Some(&found) = self.needs.get(&(label.to_owned(), want)) {
             found
         } else {
@@ -502,8 +495,8 @@ impl Solver {
             self.needs.insert((label.to_owned(), want), node);
             node
         };
-        if let (Some(line), Type::Rec(shape)) = (line, types.at(node)) {
-            types.mark(shape, line);
+        if let Type::Rec(shape) = types.at(node) {
+            types.mark(shape, site.clone());
         }
         node
     }
@@ -553,7 +546,7 @@ impl Solver {
                 .max()
                 .unwrap_or_default(),
             Type::Opt(value) => Self::depth(types, value, seen),
-            Type::Var(_) | Type::Prim(_) => Level::default(),
+            Type::Var(_) => Level::default(),
         }
     }
 
@@ -561,7 +554,7 @@ impl Solver {
         match types.at(ty) {
             Type::Var(unknown) => Ident::Var(unknown),
             Type::Rec(shape) => Ident::Rec(shape),
-            Type::Fun { .. } | Type::Opt(_) | Type::Prim(_) => Ident::Node(ty),
+            Type::Fun { .. } | Type::Opt(_) => Ident::Node(ty),
         }
     }
 
@@ -584,7 +577,7 @@ impl Solver {
                 return Clash::IncompleteDispatch {
                     unset: unset.clone(),
                     attribute: attribute.to_owned(),
-                    line: types.line(want),
+                    site: types.site(want).clone(),
                 };
             }
         }
@@ -601,12 +594,21 @@ impl Default for Solver {
 #[cfg(test)]
 mod tests {
     use super::{Clash, Solver};
-    use crate::types::{Level, Type, Types};
+    use crate::types::{Level, Type, TypeId, Types};
+
+    /// A ground shape standing in for a built-in, named the way the engine names
+    /// one so that instantiation shares it.
+    fn ground(types: &mut Types, alias: &str) -> TypeId {
+        let shape = types.rec(Vec::new());
+        let ty = types.node(Type::Rec(shape));
+        types.name(ty, alias);
+        ty
+    }
 
     #[test]
     fn lets_a_base_type_be_used_as_itself() {
         let mut types = Types::default();
-        let (given, wanted) = (types.bytes(), types.bytes());
+        let (given, wanted) = (ground(&mut types, "bytes"), ground(&mut types, "bytes"));
         assert_eq!(
             Solver::default().constrain(&mut types, given, wanted),
             Ok(()),
@@ -620,7 +622,7 @@ mod tests {
         let empty = types.rec(Vec::new());
         let given = types.node(Type::Rec(empty));
         let asked = types.rec(Vec::new());
-        let anything = types.bytes();
+        let anything = ground(&mut types, "bytes");
         types.bind(asked, "plus", anything);
         let wanted = types.node(Type::Rec(asked));
         assert_eq!(
@@ -636,7 +638,7 @@ mod tests {
     fn falls_through_a_decoratee_to_find_an_attribute() {
         let mut types = Types::default();
         let inner = types.rec(Vec::new());
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         types.bind(inner, "plus", bytes);
         let decorated = types.rec(Vec::new());
         let inner = types.node(Type::Rec(inner));
@@ -657,7 +659,7 @@ mod tests {
     #[test]
     fn refuses_a_plain_dispatch_on_a_value_that_can_be_bottom() {
         let mut types = Types::default();
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         let given = types.opt(bytes);
         let asked = types.rec(Vec::new());
         types.bind(asked, "plus", bytes);
@@ -672,8 +674,8 @@ mod tests {
     #[test]
     fn lets_a_definite_value_fit_where_bottom_is_allowed() {
         let mut types = Types::default();
-        let given = types.bytes();
-        let inner = types.bytes();
+        let given = ground(&mut types, "bytes");
+        let inner = ground(&mut types, "bytes");
         let wanted = types.opt(inner);
         assert_eq!(
             Solver::default().constrain(&mut types, given, wanted),
@@ -685,7 +687,7 @@ mod tests {
     #[test]
     fn lets_a_value_that_can_be_bottom_flow_into_an_unknown() {
         let mut types = Types::default();
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         let given = types.opt(bytes);
         let unknown = types.var(Level::default());
         let wanted = types.node(Type::Var(unknown));
@@ -699,7 +701,7 @@ mod tests {
     #[test]
     fn remembers_what_reached_an_unknown() {
         let mut types = Types::default();
-        let given = types.bytes();
+        let given = ground(&mut types, "bytes");
         let unknown = types.var(Level::default());
         let wanted = types.node(Type::Var(unknown));
         Solver::default()
@@ -720,7 +722,7 @@ mod tests {
         let unknown = types.var(Level::default());
         let middle = types.node(Type::Var(unknown));
         let asked = types.rec(Vec::new());
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         types.bind(asked, "plus", bytes);
         let wanted = types.node(Type::Rec(asked));
         let mut solver = Solver::default();
@@ -740,7 +742,7 @@ mod tests {
     fn takes_a_function_argument_the_opposite_way_round() {
         let mut types = Types::default();
         let narrow = types.rec(Vec::new());
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         types.bind(narrow, "plus", bytes);
         let narrow = types.node(Type::Rec(narrow));
         let wide = types.rec(Vec::new());
@@ -762,7 +764,7 @@ mod tests {
         let slot = types.node(Type::Var(slot));
         types.bind(shape, "x", slot);
         let given = types.node(Type::Rec(shape));
-        let argument = types.bytes();
+        let argument = ground(&mut types, "bytes");
         let result = types.var(Level::default());
         let result = types.node(Type::Var(result));
         let wanted = types.fun(argument, result);
@@ -900,7 +902,7 @@ mod tests {
         let mut types = Types::default();
         let deep = types.var(Level::default().deeper());
         let argument = types.node(Type::Var(deep));
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         let ty = types.fun(argument, bytes);
         Solver::extrude(&mut types, ty, Level::default(), true);
         assert_eq!(

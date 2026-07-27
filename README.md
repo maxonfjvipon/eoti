@@ -7,7 +7,7 @@ A standalone, **structural type inferencer and pre-run type checker for EO**, op
 
 It reads the XMIR a program compiles to, infers a type for every object, and reports the mistakes that would otherwise only surface at runtime — for example, dispatching `.plus` on a `string`. It is deliberately **decoupled from any compiler**: it consumes only XMIR, so the same checker works no matter what language the EO compiler or runtime is written in.
 
-> **Status:** working. It type-checks the entire `eo-runtime` — **153/153 top-level objects, 0 rejected** — in well under a second, passes all 13 accept/reject cases, and resolves every non-primitive atom return type to a real object shape. It is **not yet** wired into a build as a gate, and it prints a human-readable listing rather than the machine format of §5b. Those are the roadmap (§13).
+> **Status:** working. It type-checks the entire `eo-runtime` — **153/153 top-level objects, 0 rejected** — in well under a second, passes all 13 accept/reject cases, resolves every non-primitive atom return type to a real object shape, and emits the machine-readable verdict of §5b that a build gates on. What remains is union types and incremental re-checking (§13).
 >
 > The type system itself is settled (`docs/eo-type-inference.tex`) and its behavior is frozen as a contract in `conformance/`, recorded before the engine existed. Sections 3–12 describe what the engine implements; §13 is what remains.
 
@@ -62,15 +62,15 @@ cargo clippy --all-targets -- -D warnings
 # 1) Type-check XMIR files: one line per top-level object, its type or REJECT.
 eoti path/to/foo.xmir path/to/bar.xmir
 
-# 2) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
+# 2) The machine-readable verdict a build gates on (§5b).
+eoti --json path/to/*.xmir
+
+# 3) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
 eoti --atoms path/to/*.xmir
 
-# 3) The whole-runtime conformance test, against an EO checkout (§4).
+# 4) The whole-runtime conformance test, against an EO checkout (§4).
 EO_HOME=/path/to/eo cargo test --test runtime
 ```
-
-There is no `--json` yet. The machine format of §5b is designed and not emitted;
-that is the next thing to build (§13).
 
 Flag:
 
@@ -134,17 +134,17 @@ Notes:
 
 ### 5a. Human-readable output
 
-- **stdout, per file:** a `== <path> ==` header, then one line per top-level object: `name : <type>` or `name : REJECT -- <code> <detail>`.
-- **exit status:** `0` when nothing was rejected, `1` when something was, `2` when there was nothing to check.
+- **stdout, per file:** a `== <path> ==` header, then one line per top-level object: `name : <type>` or `name : REJECT -- <reason>`, followed by any dangling forma and a count.
+- **exit status:** `0` when nothing was rejected, `1` when something was, `2` when there was nothing to check. This is what a build gates on when it does not want to read the JSON.
 
-A rejection currently prints its stable code and its structured detail rather than
-a sentence, because the solver deliberately does not build prose (§12). Turning
-that detail into a message is part of §5b, and so is the summary report over a
-whole tree — neither is written yet.
+The solver builds no prose of its own (§12) — a failure is structured, and the
+sentence is put together when it is shown. That is why the same failure can read
+as English here and as a payload in §5b without either being parsed out of the
+other.
 
 Types are rendered in **named-binder** form: variables named once, single-use ones inlined, the rest in a trailing `where` clause, open variables `∀`-quantified. Concrete positions are shown by their object name (e.g. `number`); positions resolved via `@loc` show the object's shape.
 
-### 5b. Machine output (designed, not yet emitted — see §13)
+### 5b. Machine output (`--json`)
 
 Two outputs with different lifetimes:
 
@@ -323,11 +323,11 @@ These were each a real bug; keep them in mind before touching the solver:
 
 ## 13. Roadmap
 
-**Next step (smallest, highest value):** make it a build gate.
-1. Emit the diagnostics JSON of §5b (the tool already computes every field but `code`/`detail`).
-2. Run it as a post-parse stage that fails on `status: "errors"`. Safe to enable: silent on correct code (153/153), lenient on anything unmodeled, so it never blocks a valid build.
-3. Ship the **dangling-forma lint** (§9) as the first zero-inference check.
-4. Validate end-to-end on a deliberately broken `.eo` (e.g. `"hi".plus 1`).
+**Done:** the gate itself.
+1. ~~Emit the diagnostics JSON of §5b.~~ `--json` writes it, and `status` is the one field to read.
+2. ~~Ship the **dangling-forma lint** (§9) as the first zero-inference check.~~ It runs on every check; the runtime has none.
+3. ~~Validate end-to-end on a deliberately broken `.eo`.~~ `conformance/fixtures/reject-*.xmir`.
+4. **Wire it in** as a post-parse stage that fails on `status: "errors"`. Safe to enable: silent on correct code (153/153), lenient on anything unmodelled, so it never blocks a valid build. This is the one step that belongs in EO rather than here.
 
 **Later, each with a trigger:**
 - **Union types `|`** — so `if`/`switch`/`tuple.at` can be *declared* instead of abstaining. (Currently the honest gap: they carry no annotation.)
@@ -409,7 +409,7 @@ Order of work, and where it stands:
 1. ~~**Freeze the conformance suite**~~ — done; `conformance/examples.json` holds the 13 verdicts and the whole-runtime baseline, recorded before any of the engine was written.
 2. ~~**Build the engine**~~ — done; `types`, `solver`, `infer`, `xmir`, `resolve` and `render` all land, and the whole runtime types with nothing rejected.
 3. ~~**Add XMIR fixtures**~~ — done; `conformance/fixtures/` holds small programs whose filename states the verdict they must reach, so the repository is testable without an EO checkout.
-4. **Make it a gate** — the diagnostics JSON of §5b, then the dangling-forma lint, then wire it post-parse (§13).
+4. ~~**Make it a gate**~~ — done; `--json` emits §5b, the dangling-forma lint runs on every check, and the exit status says whether to proceed. Wiring it into EO's lifecycle is the remaining step, and it belongs in EO.
 
 ---
 

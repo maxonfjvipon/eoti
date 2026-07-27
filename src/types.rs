@@ -51,20 +51,11 @@ pub struct RecId(usize);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct FieldsId(usize);
 
-/// A base type. In EO the only inhabitant is `bytes`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Prim {
-    /// The ground type every other shape decorates.
-    Bytes,
-}
-
 /// A type.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Type {
     /// An unknown, collecting the bounds that flow through it.
     Var(VarId),
-    /// A base type.
-    Prim(Prim),
     /// Fill the parameter, get the result: a formation with a void attribute.
     Fun {
         /// What fills the void.
@@ -118,12 +109,33 @@ impl Fields {
     }
 }
 
-/// Where a shape came from: its position in the source, and the level it was
-/// defined at, which a use site needs in order to know what to make fresh.
-#[derive(Clone, Copy, Debug, Default)]
+/// Where a shape came from, and the level it was defined at — which a use site
+/// needs in order to know what to make fresh.
+#[derive(Clone, Debug, Default)]
 struct Origin {
-    line: Option<u32>,
+    site: Site,
     level: Option<Level>,
+}
+
+/// A place in a source file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spot {
+    /// The line it was written on.
+    pub line: u32,
+    /// How far into the line.
+    pub pos: u32,
+}
+
+/// Where something was written: a place in a file, and the stable locator of
+/// the object in the graph. Both are optional, because not every input carries
+/// them — and the locator is the one that survives reformatting, which is what
+/// lets a consumer cache a fact about it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Site {
+    /// Where in the file, if the reader was told.
+    pub at: Option<Spot>,
+    /// Which object in the graph, if it has a locator.
+    pub loc: Option<String>,
 }
 
 /// An object shape.
@@ -162,11 +174,6 @@ impl Types {
     #[must_use]
     pub fn at(&self, id: TypeId) -> Type {
         *self.nodes.get(id.0).expect("no such type in this arena")
-    }
-
-    /// `bytes`, the one base type.
-    pub fn bytes(&mut self) -> TypeId {
-        self.node(Type::Prim(Prim::Bytes))
     }
 
     /// Fill the parameter, get the result.
@@ -211,7 +218,7 @@ impl Types {
         let fields = self.table();
         let (voids, alias, origin) = {
             let data = self.rec_at(like);
-            (data.voids.clone(), data.alias.clone(), data.origin)
+            (data.voids.clone(), data.alias.clone(), data.origin.clone())
         };
         self.hold(RecData {
             fields,
@@ -253,17 +260,17 @@ impl Types {
     ///
     /// If the handle was not made by this arena.
     #[must_use]
-    pub fn line(&self, rec: RecId) -> Option<u32> {
-        self.rec_at(rec).origin.line
+    pub fn site(&self, rec: RecId) -> &Site {
+        &self.rec_at(rec).origin.site
     }
 
-    /// Say where in the source a shape was written.
+    /// Say where a shape was written.
     ///
     /// # Panics
     ///
     /// If the handle was not made by this arena.
-    pub fn mark(&mut self, rec: RecId, line: u32) {
-        self.rec_mut(rec).origin.line = Some(line);
+    pub fn mark(&mut self, rec: RecId, site: Site) {
+        self.rec_mut(rec).origin.site = site;
     }
 
     /// The level a formation was defined at. Instantiation makes everything
@@ -468,7 +475,16 @@ impl Types {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, Type, Types};
+    use super::{Level, Site, Spot, Type, TypeId, Types};
+
+    /// A ground shape standing in for a built-in, named the way the engine names
+    /// one so that instantiation shares it.
+    fn ground(types: &mut Types, alias: &str) -> TypeId {
+        let shape = types.rec(Vec::new());
+        let ty = types.node(Type::Rec(shape));
+        types.name(ty, alias);
+        ty
+    }
 
     #[test]
     fn gives_every_unknown_its_own_identity() {
@@ -492,7 +508,7 @@ mod tests {
     fn remembers_what_flowed_into_an_unknown() {
         let mut types = Types::default();
         let unknown = types.var(Level::default().deeper());
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         types.flow_in(unknown, bytes);
         assert_eq!(
             types.lower(unknown),
@@ -505,7 +521,7 @@ mod tests {
     fn keeps_the_slots_an_unknown_must_fit_apart_from_what_reaches_it() {
         let mut types = Types::default();
         let unknown = types.var(Level::default());
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         types.flow_out(unknown, bytes);
         assert!(
             types.lower(unknown).is_empty(),
@@ -517,7 +533,7 @@ mod tests {
     fn keeps_attributes_in_the_order_they_were_bound() {
         let mut types = Types::default();
         let shape = types.rec(Vec::new());
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         for label in ["zebra", "aardvark", "μ"] {
             types.bind(shape, label, bytes);
         }
@@ -535,7 +551,7 @@ mod tests {
     fn replaces_an_attribute_bound_twice() {
         let mut types = Types::default();
         let shape = types.rec(Vec::new());
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         let later = types.opt(bytes);
         types.bind(shape, "φ", bytes);
         types.bind(shape, "φ", later);
@@ -604,7 +620,7 @@ mod tests {
         let mut types = Types::default();
         let shape = types.rec(vec!["x".to_owned()]);
         let filled = types.applied(shape);
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         types.bind(shape, "later", bytes);
         assert_eq!(
             types.field(filled, "later"),
@@ -630,7 +646,7 @@ mod tests {
     fn a_shell_keeps_the_slots_but_none_of_the_attributes() {
         let mut types = Types::default();
         let shape = types.rec(vec!["x".to_owned()]);
-        let bytes = types.bytes();
+        let bytes = ground(&mut types, "bytes");
         types.bind(shape, "φ", bytes);
         let empty = types.shell(shape);
         assert_eq!(
@@ -644,12 +660,18 @@ mod tests {
     fn remembers_where_a_requirement_was_written() {
         let mut types = Types::default();
         let shape = types.rec(Vec::new());
-        types.mark(shape, 41);
+        types.mark(
+            shape,
+            Site {
+                at: Some(Spot { line: 41, pos: 7 }),
+                loc: Some("Φ.somewhere".to_owned()),
+            },
+        );
         let copy = types.shell(shape);
         assert_eq!(
-            types.line(copy),
-            Some(41),
-            "a copied shape dont remember where the original was written"
+            types.site(copy).loc.as_deref(),
+            Some("Φ.somewhere"),
+            "a copied shape dont remember which object the original stood for"
         );
     }
 
