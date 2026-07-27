@@ -1,0 +1,623 @@
+\documentclass[10pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
+
+\titlespacing*{\section}{0pt}{1.0ex plus .2ex minus .2ex}{0.6ex plus .1ex}
+\titleformat{\section}{\normalfont\large\bfseries}{\thesection}{0.6em}{}
+\setlength{\abovedisplayskip}{5pt}\setlength{\belowdisplayskip}{5pt}
+\setlength{\abovedisplayshortskip}{3pt}\setlength{\belowdisplayshortskip}{3pt}
+\setlength{\emergencystretch}{1em}
+
+\newcommand{\ty}[1]{\mathtt{#1}}     % a type name, in monospace
+\newcommand{\arr}{\to}               % "give ..., get ..."
+\newcommand{\opt}{\mathbin{?}}       % option
+
+\lstdefinestyle{eo}{%
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=false,
+  frame=none,
+  xleftmargin=1.4em,
+  aboveskip=0.3em,
+  belowskip=0.3em}
+\lstset{style=eo}
+
+\title{\vspace{-1.5em}Toward Type Inference for EO\\[-0.2em]
+  \large a working note: how decoration and $\bot$ already tell us the types}
+\author{Objectionary\\\small\url{https://github.com/objectionary/eo}}
+\date{July 2026}
+
+\begin{document}
+\maketitle
+\vspace{-1.4em}
+
+\begin{abstract}
+\noindent
+EO has no written-down types, but it wants a tool that catches type mistakes
+before a program runs. This note explains, in plain terms, what ``type'' should
+mean in EO, why the obvious idea (compare the \emph{name} of the returned
+object) breaks the moment we use decoration, and what to use instead: a notion
+of type based on an object's \emph{shape}. We then do three concrete things:
+write down the grammar of these shapes, give the shape (the ``signature'') of
+each built-in object, and describe --- as plain steps --- a checker that works
+out the shape of any expression and reports an error when the shapes do not
+fit. A worked example shows the checker accepting a correct program and
+rejecting two broken ones. None of this is new type theory; the pieces are all
+known and are pointed to in footnotes for the curious. The only EO-specific
+parts are how we treat decoration and the failure value~$\bot$.
+\end{abstract}
+
+\section*{What you need to know (the whole vocabulary)}
+
+Everything below uses just these words and this notation. If a footnote names a
+paper, it is optional background, not required reading.
+
+\begin{description}\setlength{\itemsep}{1pt}
+\item[Type inference] the tool figures out the ``kind'' of every value by
+  itself, because EO writes none down.\footnote{Figuring out types from
+  unannotated code is \emph{type inference}; the foundational algorithm is
+  L.~Damas \& R.~Milner, \emph{Principal type-schemes for functional programs},
+  POPL 1982.}
+\item[Nominal vs.\ structural] \emph{nominal}: two objects have the same type
+  only if they share a \emph{name}. \emph{Structural}: they match if they have
+  the same \emph{shape} --- the same attributes. EO needs structural.\footnote{%
+  Treating a type as a shape (a set of attributes) rather than a name is
+  standard; a classic reference is M.~Abadi \& L.~Cardelli, \emph{A Theory of
+  Objects}, Springer 1996.}
+\item[Usable-as (subtyping)] ``an X can go wherever a Y is wanted.'' If
+  \texttt{my-num} has every attribute \texttt{number} has, then \texttt{my-num}
+  is usable as a \texttt{number}.
+\item[Notation] $X \arr Y$ means ``give it an $X$, get a $Y$'';\quad
+  $A \mid B$ means ``an $A$ or a $B$'' (as in TypeScript);\quad
+  $T\opt$ means ``a $T$, or $\bot$'' (the failure value);\quad
+  $\{\,a:\dots,\ b:\dots\,\}$ is an object with attributes $a,b,\dots$;\quad
+  ``for any $A$'' before a type means it works for every type (the tool picks
+  which).
+\end{description}
+
+\section{The problem: EO names objects, but we care about their shape}
+
+Every built-in EO object (an ``atom'') already declares the \emph{name} of what
+it returns, after a \verb|/|. These are real lines from \texttt{number.eo}:
+\begin{lstlisting}
+[as-bytes] > number
+  [x] > plus  /number      # returns a number
+  [x] > times /number
+  [x] > gt    /bool        # returns a bool
+\end{lstlisting}
+A name like \texttt{number} or \texttt{bool} is a \emph{nominal} tag. It works
+until we decorate. Decoration is EO's ``\texttt{@}'' attribute: an object with
+an \texttt{@} behaves like whatever its \texttt{@} points to, because a call it
+does not answer itself is passed down to \texttt{@}. Consider:
+\begin{lstlisting}
+[] > my-num       # its name is `my-num'; it behaves like a number
+  5 > @
+\end{lstlisting}
+\verb|my-num| is named \verb|my-num|, but calls like \verb|plus| or \verb|gt|
+fall through \verb|@| to the \verb|5| inside, so it \emph{behaves} as a number.
+A check that compares the name \verb|my-num| against the expected \verb|number|
+wrongly says ``no.''
+
+You might try to save the name-based idea by remembering the whole decoration
+\emph{chain} (\verb|my-num| then \verb|number|) and checking whether
+\verb|number| is in it. That survives the case above but not this one:
+\begin{lstlisting}
+[] > my-num       # @ is `seq *', whose name is `seq' -- `number' is nowhere
+  seq * > @
+    "Hello"
+    5
+\end{lstlisting}
+Here \verb|my-num| still behaves like a number, because \verb|seq| runs its
+steps and hands back the last one (\verb|5|). But knowing that needs the
+\emph{meaning} of \verb|seq|, not its name. So the two examples mark a line: the
+first is answerable by names, the second only by behaviour. Any name-based
+scheme handles the first and fails the second --- so we have to describe
+behaviour, i.e.\ \emph{shape}. This is also why EO was right to switch off its
+old runtime check that compared names: the real check needs the object's shape,
+and finding a shape at runtime means running the program. Shape is better
+worked out ahead of time, by inference.
+
+\section{What ``type'' should mean: a shape, and decoration means ``usable-as''}
+
+Let a type describe what an object \emph{does}: which attributes it answers, and
+with what. \verb|number|'s type is the shape
+$\{\,\ty{plus}:\ty{number}\arr\ty{number},\ \ty{gt}:\ty{number}\arr\ty{bool},\ \dots\}$.
+The one EO-specific rule is about \texttt{@}:
+
+\begin{quote}
+\textbf{Decoration rule.} If an object has \texttt{@} pointing to something of
+shape $S$, then that object answers everything $S$ answers (directly, or by
+falling through \texttt{@}). So it is \emph{usable as} an $S$.
+\end{quote}
+
+That is the whole trick: \verb|my-num| (which decorates \verb|5|) is usable as a
+\verb|number| because its \texttt{@} is a number. The name \verb|number| does
+not disappear --- it just becomes a convenient \emph{alias} for that shape, so
+error messages can say ``number'' instead of printing the full attribute list.
+
+\section{The type grammar (the shapes a type can take)}\label{sec:grammar}
+
+A type is one of the following. Each line is a shape, with a tiny example.
+
+\begin{description}\setlength{\itemsep}{2pt}
+\item[An unknown, written $A$, $B$, \dots] a placeholder the tool has not filled
+  in yet. A fresh unknown is created for each free attribute of a formation and
+  gets pinned down as the tool learns more.
+\item[An object shape $\{\,\ell_1:\tau_1,\ \dots,\ \ell_n:\tau_n\,\}$] a list of
+  attribute names with their types. One attribute may be the special
+  \texttt{@}. A trailing ``$\dots$'' means ``and possibly more attributes'' ---
+  needed so a shape can stand for ``at least these.''\footnote{The ``at least
+  these'' part is \emph{row polymorphism}: M.~Wand, LICS 1987; D.~R\'emy, 1994.}
+\item[A tuple, $\ty{tuple}\ A$ or $\langle A, B, C\rangle$] an ordered
+  collection; either ``a tuple of $A$'s'' or a fixed-length one with a type per
+  position.
+\item[Failure, $\bot$, and the option $T\opt$] $\bot$ is the value a terminated
+  computation produces; $T\opt$ means ``a $T$, or $\bot$.''
+\item[Either/or, $A \mid B$] a value that is an $A$ or a $B$ (for example, a
+  branch that returns one of two things).
+\item[A self-referring shape, ``loop $A.\ \dots$''] for objects that mention
+  themselves, like a list whose tail is another list of the same
+  kind.\footnote{\emph{Recursive types}; R.~Amadio \& L.~Cardelli, 1993.}
+\end{description}
+
+\emph{For the record (skippable), the same grammar in symbols:}
+\[
+\tau \;::=\; A \;\mid\; \{\ell_1{:}\tau_1,\dots,\ell_n{:}\tau_n\} \;\mid\;
+\ty{tuple}\,\tau \;\mid\; \langle\tau,\dots,\tau\rangle \;\mid\; \bot \;\mid\;
+\tau\opt \;\mid\; \tau \mid \tau \;\mid\; \mu A.\,\tau
+\]
+
+\section{Failure as a type: $\bot$ and \texttt{recovered}}\label{sec:fail}
+
+EO recently made every unrecoverable failure produce one special value,
+$\bot$, and the \emph{only} way to catch it is the object \verb|recovered|
+(\texttt{recovered.eo}):
+\begin{lstlisting}
+[value alternative] > recovered /bytes      # value, unless it is a bottom,
+recovered (2.as-i64.div 0.as-i64) 7         # in which case: alternative  ==> 7
+\end{lstlisting}
+In types, this is simple and powerful. An operation that might fail has type
+$T\opt$ (``a $T$, or $\bot$''). Calling a normal attribute on a $T\opt$ is an
+error --- you must clear the $\bot$ first. \verb|recovered| is what clears it:
+give it a maybe-failed value and a fallback, and it hands back a definite value.
+Its type is
+\[
+\ty{recovered} :\ \text{for any } A, B:\quad A\opt \arr B \arr (A \mid B),
+\]
+read as: ``take an $A$-or-$\bot$ and a $B$; give back an $A$ or a $B$'' (the
+$\bot$ is gone). This is the same shape as ``get the value out of a box, or use
+a default'' in other languages.\footnote{This need to combine ``a value or
+nothing'' with ``an $A$ or a $B$'' in one inferred type is exactly what
+\emph{algebraic subtyping} was built to do well: S.~Dolan, PhD thesis,
+Cambridge 2017; and a very readable version, L.~Parreaux, \emph{The Simple
+Essence of Algebraic Subtyping}, ICFP 2020 (about 500 lines of code).}
+
+\paragraph{Two doors, and safe chaining with \texttt{?.}} Since a normal dispatch
+on a $T\opt$ is rejected, the programmer has exactly two ways forward, and the
+checker enforces the choice: \emph{resolve} the failure now with \verb|recovered|,
+or \emph{defer} it with the fragile dispatch \verb|?.|. The rule for \verb|x?.y|
+is to look past a possible $\bot$, dispatch \verb|.y| on what is inside (fully
+shape-checked), and re-wrap the answer as maybe-$\bot$ --- so fragility rides
+along the chain, and \verb|x?.y?.z?.a| comes out as $A\opt$, a value that is still
+maybe-$\bot$ until some \verb|recovered| ends it. This is ordinary optional
+chaining (Rust's \verb|?|, TypeScript's \verb|?.|); it turns ``I carried the
+$\bot$ this far'' into something the compiler tracks and, at the first use as a
+definite value, forces you to settle. It does not switch off checking:
+\verb|x?.y?.z?.bogus| is still rejected when that shape has no \verb|bogus|. And
+\verb|recovered| is checked too --- \verb|(recovered x alt).y| is accepted only
+when the fallback \verb|alt| can also answer \verb|.y|, so the two arms really are
+interchangeable.
+
+\paragraph{Where $\bot$ comes from.} The checker never \emph{guesses} fragility
+from how code is written. $T\opt$ enters only from declared \emph{sources} --- an
+atom whose stated result is $T\opt$ (a lookup that can miss, a slice that can run
+off the end), the \verb|?.| operator, and the rule just below --- and then
+propagates by ordinary flow. An object is fragile in a given place exactly when
+its inferred type there is $T\opt$, traced back to one of those sources. (A
+corollary worth stating: today's parser output predates the $\bot$/\verb|?.|
+syntax, so the real objects show almost no fragility yet --- the machinery is
+exercised by hand-built cases and by the rule below.)
+
+\paragraph{Incompleteness as fragility.} EO adds one more source of $\bot$, and a
+tidy one. Some voids are optional recovery callbacks --- \verb|cant-convert| on a
+numeric conversion, \verb|cant-connect| on a socket --- which a confident
+programmer may leave unset. But an object with any attribute unset is
+\emph{incomplete}, and an incomplete object is fragile: using it must go through
+\verb|?.| or be recovered. This needs no new machinery --- a formation that
+escapes as a value with voids still unfilled is given type $T\opt$; application is
+allowed to see through the $\opt$ (so \verb|foo 1 2| still completes a
+two-argument \verb|foo| to a definite value), while any plain dispatch on it meets
+the discipline above. Run over the whole runtime with the rule on, the checker
+flags exactly five objects: \verb|number| and \verb|i64| (a conversion used with
+\verb|cant-convert| unset), \verb|fs/file| (\verb|cant-check|), \verb|nk/socket|
+(\verb|cant-receive|), and \verb|fs/path| (an unapplied \verb|uri|). Four are
+precisely the recovery-callback situations the rule is meant to catch. The fifth,
+reading \verb|posix.separator|, is \emph{not} a false positive. The rule is
+deliberately \emph{object-level} --- an object with any attribute unset is
+fragile, full stop --- so dispatching \verb|.separator| on a \verb|posix| whose
+\verb|uri| was never supplied is correctly rejected, even though \verb|separator|
+reads only a constant. Reaching into a half-built object is exactly the smell the
+rule exists to forbid; it is not object-oriented, and the fix belongs in the EO
+code (give \verb|separator| a home that does not demand a \verb|uri|), not in a
+weaker, attribute-level rule. This is the same kind of latent-smell surfacing as
+the \verb|while| and \verb|switch| results below --- a type the author never
+intended, pointing at a design that should change.
+
+\section{The atoms, annotated}\label{sec:atoms}
+
+The built-in objects are the \emph{starting facts}: the checker cannot look
+inside them (they are implemented in Java), so we state their shapes by hand,
+and everything else is worked out from these. Writing these down is step one of
+any real effort --- if a shape cannot be stated here, the grammar of Section~\ref{sec:grammar}
+is not yet good enough. The key ones:
+
+\begin{center}\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{EO} & \textbf{Type} & \textbf{In plain words} \\
+\midrule
+\verb|number.plus|      & $\ty{number}\arr\ty{number}$                                   & a number in, a number out \\
+\verb|number.gt|        & $\ty{number}\arr\ty{bool}$                                     & compare; give \verb|true|/\verb|false| \\
+\verb|bool.if|          & for any $A,B$: $A\arr B\arr (A\mid B)$                          & pick one of two branches \\
+\verb|recovered|        & for any $A,B$: $A\opt\arr B\arr (A\mid B)$                      & the value, unless $\bot$, then the fallback \\
+\verb|seq|              & for any $A$: $(\text{tuple ending in } A)\arr (A\mid\ty{bool})$   & run every step, give the last \\
+\verb|tuple.head|       & for a $\ty{tuple}\,A$: $A$                                      & the last element (EO tuples grow at the head) \\
+\verb|tuple.with|       & for a $\ty{tuple}\,A$: $B\arr \ty{tuple}\,(A\mid B)$       & append one element \\
+\verb|map.found(k).get| & for any $B$: $B\arr (V\mid B)$                                  & the stored value, or your fallback \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Two things to notice. \verb|bool.if| shows why we need ``for any $A,B$'':
+the branches may have different types, and the answer is ``one or the other.''
+\verb|seq|'s answer depends on \emph{which} element is last, but that is fixed
+the moment the tuple is written, so no program needs to run --- the tool just
+reads off the last position's type.
+
+\section{The checker, over the \texttt{@}-core}\label{sec:checker}
+
+The core of EO has only four moves: \textbf{make} an object (a formation),
+\textbf{apply} arguments to it, \textbf{dispatch} an attribute (a call
+\verb|e.m|), and \textbf{decorate} via \texttt{@}. A checker only has to handle
+these four, plus looking up names. Here it is as plain steps; \verb|typeof|
+returns the shape of an expression, and \verb|usable-as| answers ``can an X go
+where a Y is wanted?''
+
+\begin{lstlisting}
+typeof(expr, env):                       # env maps names -> known types
+  NAME  x:            return env[x]
+  MAKE  [p1 p2 ...] with body:
+      shape = {}
+      for each free attribute p:         shape[p] = a fresh unknown
+      for each named child  n = e:        shape[n] = typeof(e, env + params)
+      if there is an `@' child e:          shape["@"] = typeof(e, env + params)
+      return shape
+  APPLY  f arg  (fills f's next free attribute p):
+      ft = typeof(f, env);  at = typeof(arg, env)
+      require  usable-as(at, ft.expected(p))          # else ERROR
+      return  ft  with p replaced by at
+  DISPATCH  e.m:
+      t = typeof(e, env)
+      if t is an option (T?):  ERROR "`m' used on a value that can be bottom;
+                                      recover it first"
+      look up m in t;  if missing, follow t["@"] and look again (repeat)
+      if still missing:        ERROR "`m' is not an attribute of this object"
+      return the found attribute's type
+
+usable-as(X, Y):                         # "an X can go where a Y is wanted"
+  if Y is an unknown:   set Y := X;  ok
+  if X is an option and Y is not:   NOT ok           # a bottom might leak
+  if both are object shapes:   ok  iff  every attribute Y requires is present
+        in X (directly or through @), and usable-as holds on each of them
+\end{lstlisting}
+
+\noindent\textbf{A worked run.} Take a correct program:
+\begin{lstlisting}
+[] > my-num
+  5 > @
+my-num.plus 1
+\end{lstlisting}
+\begin{enumerate}\setlength{\itemsep}{1pt}
+\item \verb|typeof(5)| is \verb|number| (a number literal).
+\item \verb|typeof(my-num)|: a formation with an \verb|@| child, so its shape is
+  $\{\,\ty{@}:\ty{number}\,\}$.
+\item \verb|my-num.plus| is a \textsc{dispatch}: \verb|my-num| has no
+  \verb|plus| of its own, so follow \verb|@| to \verb|number|, which has
+  \verb|plus| $:\ty{number}\arr\ty{number}$. Found.
+\item \textsc{apply} to \verb|1|: \verb|1| is a \verb|number|, and \verb|plus|
+  wants a \verb|number| --- \verb|usable-as| holds. Result: \verb|number|.
+\end{enumerate}
+Accepted; the whole thing is a \verb|number|. Now two programs it rejects:
+\begin{lstlisting}
+[] > my-num              (m.get "k").plus 1     # m.get can fail, so its type
+  "hi" > @                                      # is `number?' (number or bottom)
+my-num.plus 1
+\end{lstlisting}
+On the left, \verb|typeof(my-num)| is $\{\ty{@}:\ty{string}\}$; \textsc{dispatch}
+of \verb|plus| finds none on \verb|my-num|, follows \verb|@| to \verb|string|,
+finds none there either --- \emph{error:} ``\texttt{.plus} is not an attribute of
+\texttt{my-num} (it decorates a string).'' On the right, the receiver has type
+\verb|number?|, so \textsc{dispatch} stops immediately --- \emph{error:}
+``\texttt{.plus} used on a value that can be $\bot$ (from \texttt{m.get});
+recover it first, e.g.\ \texttt{recovered (m.get "k") 0}.'' Recovering turns the
+\verb|number?| back into a \verb|number| (that is \verb|recovered|'s type), and
+the fixed program is accepted. Both mistakes are caught without running
+anything.
+
+\section{The spine: solving, and surviving recursion}\label{sec:spine}
+
+The steps in Section~\ref{sec:checker} decide each fit \emph{on the spot}. Two
+things break that --- the top two gaps from typing real objects by hand --- and
+both are fixed by one idea used twice: \textbf{assume, then reconcile}.
+
+\paragraph{Collect, then solve.} Split typing into two passes. \emph{Collect:}
+walk the code once, give every unknown a fresh name, and instead of deciding
+fits, just \emph{write down} each requirement as a note --- ``this unknown must
+be usable as a \verb|number|,'' ``this one must have a \verb|.head|,'' ``this
+value flows into that slot.'' \emph{Solve:} work through the notes and pin each
+variable down. Why two passes? A variable often makes sense only once you have
+seen all its uses: if \verb|x| is used once where a number is wanted and once
+where a string is wanted, no single on-the-spot decision is right, but the two
+notes together say \verb|x| is $\ty{number}\mid\ty{string}$. Deciding early
+cannot produce that union; collecting can.
+
+Solving needs almost no machinery. Give each variable two lists:
+\textbf{flows-in} (things put into it) and \textbf{flows-out} (slots it is used
+in). To process a note ``$X$ usable-as $Y$'': if $X$ is a variable, add $Y$ to
+its flows-out; if $Y$ is a variable, add $X$ to its flows-in; either way,
+re-check that everything already on the other list still fits (which may make
+smaller notes); if both are object shapes, break it into one note per attribute
+$Y$ asks for; and if $X$ can be $\bot$ while $Y$ cannot, that is the ``recover
+it first'' error. A variable's final type is \emph{everything that flowed into
+it, or-ed together}. So unions and ``for any'' are never invented by hand ---
+they fall out of the bookkeeping.\footnote{This two-list flows-in/flows-out
+bookkeeping is essentially Simple-sub, the readable form of algebraic subtyping
+from the Section~\ref{sec:fail} footnote --- about 500 lines including a parser.}
+
+\paragraph{Tie the knot.} Recursion --- an object that mentions itself --- made
+the Section~\ref{sec:checker} walk loop forever (\verb|seq|, \verb|map|,
+\verb|switch|, \verb|while|, and \verb|number| all do it). Same idea, on the
+object: before looking \emph{inside}, give it a fresh variable \verb|t| and
+remember ``this object $=$ \verb|t|.'' Now type the body; every self-reference
+finds \verb|t| --- a name, not another trip inside --- so the walk stops. The
+body works out to a shape $S$; close the loop by recording \verb|t|~$=S$. Since
+$S$ may contain \verb|t|, that is a self-referring shape --- the ``loop
+$A.\dots$'' from Section~\ref{sec:grammar}. One last loop hides in the solver:
+two self-referring types can bounce a note back and forth forever, so the solver
+keeps a \textbf{seen} set and stops when a note comes back. Assume-then-reconcile,
+one level down.
+
+Here is Section~\ref{sec:checker}'s checker with the spine in place ---
+\verb|infer| returns a type (with variables) and piles up notes; \verb|solve|
+settles them:
+\begin{lstlisting}
+infer(expr, env):
+  NAME x:   return env[x]
+  MAKE  [free...] with children and maybe an `@':
+      t = fresh variable
+      env2 = env + (this object -> t)       # register BEFORE descending
+      for each free attribute p:  shape[p] = fresh variable
+      for each child  n = e:      shape[n] = infer(e, env2 + params)
+      if there is an `@' child e:  shape["@"] = infer(e, env2 + params)
+      note( t = shape )                     # tie the knot
+      return t
+  APPLY  f arg:
+      r = fresh variable
+      note( infer(f,env) usable-as (takes infer(arg,env), gives r) )
+      return r
+  DISPATCH  e.m:
+      r = fresh variable
+      note( infer(e,env) usable-as { m : r, ... } )
+      return r
+
+solve(note "X usable-as Y", seen):
+  if (X,Y) in seen: return                  # stop cycles (recursive types)
+  seen.add (X,Y)
+  if X is a variable:  X.flowsOut += Y;  for L in X.flowsIn:  solve(L usable-as Y)
+  elif Y is a variable: Y.flowsIn += X;  for U in Y.flowsOut: solve(X usable-as U)
+  elif both are shapes: for each label m in Y:  solve(X[m] usable-as Y[m])
+  elif X can be bottom and Y cannot:  ERROR "recover the bottom first"
+# afterwards: each variable's type = the union of its flows-in
+\end{lstlisting}
+
+\paragraph{A recursive run that used to loop.} Take a small self-referring
+object:
+\begin{lstlisting}
+[tup] > last
+  if. > @
+    tup.tail.length.eq 0
+    tup.head
+    last tup.tail
+\end{lstlisting}
+\begin{enumerate}\setlength{\itemsep}{1pt}
+\item Start on \verb|last|: fresh \verb|t|, remember \verb|last|~$=$~\verb|t|.
+\item Walk the body. \verb|tup| is a fresh \verb|u|. \verb|tup.head| notes
+  ``\verb|u| has \verb|head| of type \verb|w|''; \verb|tup.tail| notes ``\verb|u|
+  has \verb|tail| of type \verb|v|.''
+\item \verb|last tup.tail| is the self-call. \verb|last| is \verb|t| --- a
+  \emph{variable} (from step 1), \emph{not} another descent --- so the walk
+  \textbf{stops here}, noting ``\verb|t| takes \verb|v|, gives \verb|r|.''
+\item \verb|if. cond A B| gives \verb|A|~$\mid$~\verb|B|, here
+  \verb|w|~$\mid$~\verb|r|. Close the knot: \verb|t|~$=$~(\verb|u|~$\to$~(\verb|w|~$\mid$~\verb|r|)),
+  self-referring through \verb|r|.
+\item Solving settles the notes: \verb|u| is a tuple, and \verb|w|, \verb|r| are
+  its element type, giving \verb|last| the type ``for any $A$:
+  $\ty{tuple}\,A \to A$''. No loop, no annotations. (That ``\verb|tail| of a
+  tuple is the same tuple'' step needs the tuple rules --- the next piece to add.)
+\end{enumerate}
+The spine closes gaps~1 and~2. The remaining Tier-1 items --- tuple rules,
+applying the ``for any'' atom signatures, and pushing types into callbacks ---
+build directly on this collect-and-solve frame.
+
+\section{Completing the core: tuples, generic atoms, callbacks}\label{sec:core-rest}
+
+With the spine (Section~\ref{sec:spine}) in place, the other three Tier-1 gaps
+are each a small addition to the same collect-and-solve frame.
+
+\paragraph{Tuples.} Give a tuple two possible shapes: a \emph{fixed} one,
+$\langle\tau_1,\dots,\tau_n\rangle$, when the length is known (as in
+\verb|* a b c|), and a \emph{loose} one, $\ty{tuple}\,A$ (``every element is
+usable as $A$''), when it is not (as when a tuple is grown in a loop). The
+accessors follow --- recalling that EO tuples grow at the head, so \verb|head|
+is the \emph{last} element:
+\begin{itemize}\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}
+\item \verb|* a b c| $:\;\langle\tau_a,\tau_b,\tau_c\rangle$; \quad
+      \verb|t.length| $:\;\ty{number}$.
+\item \verb|t.head| $:\;\tau_n$ (fixed) or $A$ (loose); \quad
+      \verb|t.tail| $:\;\langle\tau_1,\dots,\tau_{n-1}\rangle$ or $\ty{tuple}\,A$.
+\item \verb|t.with x| $:\;\langle\tau_1,\dots,\tau_n,\tau_x\rangle$ or
+      $\ty{tuple}\,(A\mid\tau_x)$.
+\end{itemize}
+The solver already breaks a shape into one note per part, and a tuple is just
+another shape: ``$X$ usable-as $\langle\dots\rangle$'' becomes one note per
+position (fixed) or one note on the shared element (loose). The fixed form is
+what lets \verb|seq| and \verb|switch| pin their result to the \emph{last}
+element without running anything; a loose tuple falls back to the union of its
+elements.
+
+\paragraph{Generic atoms: instantiate on use, generalize on definition.} The
+Section~\ref{sec:atoms} signatures are \emph{schemes} --- types with ``for any''
+holes --- and two moves connect them to the checker. \textbf{Instantiate:} at
+each use, make \emph{fresh} copies of the ``for any'' variables, then note the
+arguments against them. \verb|recovered 42 7| makes a fresh \verb|A| and
+\verb|B|, notes ``\verb|42| flows into \verb|A|?'' (so \verb|A| becomes
+\verb|number|) and ``\verb|7| flows into \verb|B|'' (\verb|B| becomes
+\verb|number|), and the result \verb|A| $\mid$ \verb|B| solves to \verb|number|
+--- an argument-dependent result computed by the solver, no evaluation, and the
+fresh copies stop two calls at different types from tangling. \textbf{Generalize:}
+when a user object's inferred type still has unknowns that nothing outside
+constrains, freeze them as ``for any,'' turning a one-off type into a reusable
+scheme so \verb|reduced| works at every element type. These are the two standard
+moves of Hindley--Milner, with each variable's flows-in/flows-out bounds riding
+along.
+
+\paragraph{Making it sound: levels.} One question decides whether generalization
+helps or hurts: \emph{which} unknowns may be frozen as ``for any''? Freeze one
+that is really shared with the surrounding object and you duplicate it wrongly;
+freeze too few and a reused object collapses all its call sites into one --- the
+path object \verb|fs/path| uses its helper \verb|posix| at a dozen sites, and
+without generalization their arguments merge, so a parameter that is a string at
+every real call is inferred as an impossible \verb|string|~\&~\verb|bytes| and a
+correct object is rejected. The standard cure is to stamp every unknown with a
+\textbf{level} --- the nesting depth of the object being defined --- and, at a
+use, to instantiate exactly the variables \emph{deeper} than that use while
+sharing the rest; a companion step, \emph{extrusion}, lowers the level of any
+variable that escapes to a shallower scope so that nothing still-shared is ever
+frozen. Levels are what make ``instantiate on use, generalize on definition''
+sound rather than merely plausible, and they are the part the prototype in the
+next section spent the most care getting right.
+
+\paragraph{Callbacks: push the expected type in.} An atom that takes a function
+says so in its signature --- \verb|malloc.for|'s scope is \verb|block -> R|,
+\verb|while|'s condition is \verb|number -> bool|. When the argument is a
+formation \verb|[m] ...|, do not type it blind: \emph{check} it against that
+expected function type, which seeds the parameter (\verb|m| is a \verb|block|)
+before typing the body --- so \verb|m.put| and \verb|m.read| resolve, and any
+mistake is reported right at the callback. Having the checker both \emph{infer}
+a type and \emph{check against} an expected one is the only real addition here.
+One rule makes it work: to fit one function where another is wanted, the results
+go the same way but the \emph{arguments go the opposite way} --- a
+\verb|block -> R| is wanted, so the callback's parameter must be willing to
+\emph{accept} a \verb|block|. That backwards flow is what carries the
+\verb|block| into \verb|m|, and it is the one genuinely counter-intuitive rule
+in the whole system.\footnote{Both \emph{inferring} and \emph{checking against}
+an expected type is \emph{bidirectional typing}: a friendly survey is
+J.~Dunfield \& N.~Krishnaswami, \emph{Bidirectional typing}, ACM Computing
+Surveys, 2021. ``Arguments go the opposite way'' is standard function subtyping
+--- contravariant in the argument, covariant in the result.}
+
+With the spine and these three additions, the checker can walk the whole
+standard library --- which is what the next section shows.
+
+\section{It scales to real code: a working checker}
+
+These rules are not only on paper. A prototype of about 900 lines implements
+exactly this --- the grammar, the annotated atoms, the collect-then-solve spine,
+and the level-based generalization above --- and reads EO's \emph{real} parser
+output (the XMIR under \texttt{eo-runtime/target/eo/1-parse}). Run over the whole
+runtime it types \textbf{all 117 top-level objects}, with no rejections, in under
+a second. And --- the actual test of a type system --- it still \emph{catches}
+mistakes: a string sent \verb|.plus|, a value used at once as a function and as a
+string, a dispatch on an attribute that is not there are all reported, and every
+deliberately-wrong example in Sections~\ref{sec:fail}--\ref{sec:core-rest}
+rejects as designed. Passing everything is trivial for a checker that says yes to
+everything; this one says no in the right places.
+
+The standard library comes out as the rules predict. The list combinators
+(\texttt{tuple/mapped.eo}, \texttt{tuple/reduced.eo}) are generic: \verb|mapped|
+has type ``for any $A,B$: $\ty{tuple}\,A \arr (A\arr B) \arr \ty{tuple}\,B$'' and
+\verb|reduced| is the usual fold. Their callbacks carry no annotations --- the
+tool reads each callback's type from its body --- so
+\verb|mapped (* 1 2 3) (x.times 2 > [x])| is a tuple of numbers, while a callback
+returning a \verb|bool| makes a later \verb|.plus| on an element a caught error.
+A \verb|map| never returns a bare value: \verb|found(key).get| \emph{demands} a
+fallback, so a lookup has type ``value \emph{or} fallback'' --- absence lives in
+the type. And \verb|switch| returns \verb|true| when no case matches, so its
+inferred type carries a stray \verb|bool| the author never intended: the type
+quietly points at a real bug no test triggers as long as some case matches.
+
+\paragraph{What took the care.} Almost all of it was the level machinery, and
+four subtleties were decisive --- each a place the obvious implementation is
+wrong. The self-reference that ties a recursive knot must live \emph{inside} the
+object's own scope, not outside it, or generalization silently de-generalizes the
+parameters and the checker stops catching mistakes. The built-in atoms must sit
+at the outermost level, or every use of one drags the solver into needless
+extrusion and it crawls. The parent link $\rho$ must be left out when measuring
+an object's level, or a deep parent keeps a record ``too deep'' to extrude and
+solving never stops. And a large shared type must be printed by naming each
+variable once, or \verb|fs/path|'s type --- a wide, cyclic shape --- prints
+exponentially. None of these touches the design of
+Sections~\ref{sec:grammar}--\ref{sec:core-rest}; all are the ordinary hazards of
+a level-based solver, now charted.
+
+\section{Is this doable, and your ``just compile it'' idea}
+
+Yes, and it is not exotic: a type based on shapes, worked out automatically,
+with ``usable-as'' and ``$A$ or $B$,'' is a well-charted design.\footnote{The
+combination --- structural shapes, ``usable-as,'' unions, and full inference ---
+is the subject of the algebraic-subtyping work cited in Section~\ref{sec:fail}; a gentle
+textbook is B.~Pierce, \emph{Types and Programming Languages}, MIT Press 2002.}
+It belongs in a compile-time step over XMIR (EO's intermediate form), never in
+the runtime.
+
+Your idea of translating EO into a strictly-typed language (say Haskell) and
+letting its compiler judge is a real technique, and half of it fits EO
+perfectly: $\bot$ maps to Haskell's \texttt{Maybe} and \verb|recovered| to
+\texttt{fromMaybe}. The catch is the other half. Haskell decides types by
+\emph{name} and has no built-in ``usable-as,'' which is precisely EO's
+decoration --- so you would rebuild the hard part inside Haskell's most awkward
+corner, the errors would come out talking about the generated Haskell rather
+than the user's EO, and ``if it compiles, it is safe'' is only true if the
+translation is faithful, which you can only know by writing down the rules in
+Sections~\ref{sec:grammar}--\ref{sec:core-rest} first. If you do want to borrow a compiler, pick a
+\emph{structurally}-typed one: TypeScript already decides types by shape and has
+$A\mid B$ and ``value or nothing'' built in --- almost the whole EO picture ---
+and OCaml's object types are the same idea with more rigour. Best use: a quick
+prototype to test these rules, not the finished checker. Either way the rules
+come first.
+
+So the order is: (1)~this grammar; (2)~these atom shapes; (3)~this checker,
+first on the four-move core, then widened, dog-fooded on the standard library.
+The parts that will take real care are self-referring shapes (the ``loop''
+case), keeping the tool's guesses predictable, and
+error messages that speak EO. None is unexplored; all are documented. EO is
+ready to start --- the hard idea, that decoration forces us to talk about shape,
+is already behind us.\footnote{EO and its calculus: Y.~Bugayenko, \emph{EOLANG
+and $\varphi$-calculus}, arXiv:2111.13384, 2021; N.~Kudasov \& V.~Sim,
+\emph{Formalizing $\varphi$-calculus}, arXiv:2204.07454, 2022.}
+
+\end{document}

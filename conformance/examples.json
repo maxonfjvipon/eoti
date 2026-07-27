@@ -1,0 +1,94 @@
+{
+  "schema": "eo-type-inference-conformance/1",
+  "oracle": "reference/eo_type_inference.py",
+  "examples": [
+    {
+      "id": "decorated-number-plus",
+      "description": "my-num (=5) . plus 1",
+      "expect": "ok",
+      "guards": "a decoratee is dispatched through, so `@` gives width subtyping"
+    },
+    {
+      "id": "decorated-string-plus",
+      "description": "my-num (=\"hi\") . plus 1",
+      "expect": "reject",
+      "reason": "no attribute `plus` on bytes",
+      "guards": "width subtyping does not invent attributes the decoratee lacks"
+    },
+    {
+      "id": "recovered-fragile-number",
+      "description": "recovered (fragile number) 7",
+      "expect": "ok",
+      "guards": "`recovered` eliminates `⊥`, typed from its own annotation as ∀A. A? → A → A"
+    },
+    {
+      "id": "unrecovered-fragile-plus",
+      "description": "(fragile number) . plus 1",
+      "expect": "reject",
+      "reason": "value can be ⊥ (bottom); recover it first",
+      "guards": "the option discipline rejects plain dispatch on a maybe-⊥ value"
+    },
+    {
+      "id": "bool-if-same-branches",
+      "description": "bool.if 123 42",
+      "expect": "ok",
+      "guards": "both branches of a conditional flow into one result variable"
+    },
+    {
+      "id": "bool-if-union-branches",
+      "description": "bool.if 123 <bytes>",
+      "expect": "ok",
+      "guards": "branches of unlike shape join without a spurious error, absent union types"
+    },
+    {
+      "id": "bool-if-result-dispatch",
+      "description": "(bool.if 42 7).plus 1",
+      "expect": "ok",
+      "guards": "a requirement on a conditional's result reaches both branches"
+    },
+    {
+      "id": "bool-if-result-misuse",
+      "description": "(bool.if 42 \"x\").plus 1",
+      "expect": "reject",
+      "reason": "no attribute `plus` on bytes",
+      "guards": "a requirement on a conditional's result is checked against every branch"
+    },
+    {
+      "id": "structural-requirement",
+      "description": "main = [a] > a.x",
+      "expect": "ok",
+      "guards": "an unsatisfied requirement stays a variable in an open world, never a guess"
+    },
+    {
+      "id": "requirement-met-at-call-site",
+      "description": "(main=[a]>a.plus 5) 42",
+      "expect": "ok",
+      "guards": "an accumulated requirement is checked at the call site and number satisfies it"
+    },
+    {
+      "id": "requirement-broken-at-call-site",
+      "description": "(main=[a]>a.plus 5) \"hi\"",
+      "expect": "reject",
+      "reason": "no attribute `plus` on bytes",
+      "guards": "the same requirement fails on a call site that cannot meet it"
+    },
+    {
+      "id": "self-recursion-fixpoint",
+      "description": "rec=[n]>(n.eq 0).if 0 (rec (n.minus 1))",
+      "expect": "ok",
+      "guards": "tying the recursion knot at body level leaves the parameters generalizable"
+    },
+    {
+      "id": "recursive-tuple-walk",
+      "description": "last = [tup] > (tup.tail.length.eq 0).if tup.head (last tup.tail)",
+      "expect": "ok",
+      "guards": "a cyclic object terminates; this one once made the solver loop forever"
+    }
+  ],
+  "runtime": {
+    "source": "eo-runtime/target/eo/1-parse",
+    "objects": 153,
+    "rejected": 0,
+    "note": "whatever the current object count is, none of it may be rejected"
+  }
+}

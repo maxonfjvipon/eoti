@@ -1,0 +1,5 @@
+/target
+**/__pycache__/
+*.pyc
+/eo-type-inference-report.md
+.DS_Store
