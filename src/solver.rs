@@ -71,6 +71,28 @@ impl Clash {
         }
     }
 
+    /// The same failure, blamed on the shape the attribute was asked of rather
+    /// than on the decoratee the search ran out in.
+    ///
+    /// Falling through `@` is how width subtyping works, so a missing attribute
+    /// surfaces at the far end of a decoratee chain — at `bytes`, nearly always.
+    /// That is true and useless: `"hi".plus` is a mistake about a string, and
+    /// the string is what somebody wrote. Only a failure about this very
+    /// attribute moves; whatever went wrong deeper down stays where it happened.
+    #[must_use]
+    fn blamed(self, label: &str, receiver: TypeId) -> Self {
+        match self {
+            Self::UnknownAttribute {
+                attribute, site, ..
+            } if attribute == label => Self::UnknownAttribute {
+                attribute,
+                receiver,
+                site,
+            },
+            settled => settled,
+        }
+    }
+
     /// Whether a failure is worth stopping a build over.
     ///
     /// All but one are: a shape that cannot fit is a mistake the program would
@@ -351,7 +373,8 @@ impl Solver {
                 } else if let Some(decoratee) = types.field(have, "@") {
                     let site = types.site(want).clone();
                     let need = self.need(types, &label, wanted, &site);
-                    self.fit(types, decoratee, need, seen)?;
+                    self.fit(types, decoratee, need, seen)
+                        .map_err(|clash| clash.blamed(&label, lhs))?;
                 } else {
                     return Err(Clash::UnknownAttribute {
                         attribute: label,
@@ -642,6 +665,31 @@ mod tests {
                 .map_err(|clash| clash.code()),
             Err("type/unknown-attribute"),
             "dispatching an attribute nothing has dont fail"
+        );
+    }
+
+    #[test]
+    fn blames_the_shape_a_missing_attribute_was_asked_of() {
+        let mut types = Types::default();
+        let bare = types.rec(Vec::new());
+        let bare = types.node(Type::Rec(bare));
+        let decorated = types.rec(Vec::new());
+        types.bind(decorated, "@", bare);
+        let given = types.node(Type::Rec(decorated));
+        let asked = types.rec(Vec::new());
+        let anything = ground(&mut types, "bytes");
+        types.bind(asked, "plus", anything);
+        let wanted = types.node(Type::Rec(asked));
+        assert_eq!(
+            Solver::default()
+                .constrain(&mut types, given, wanted)
+                .err()
+                .and_then(|clash| match clash {
+                    Clash::UnknownAttribute { receiver, .. } => Some(receiver),
+                    _ => None,
+                }),
+            Some(given),
+            "a missing attribute dont get blamed on the shape it was asked of"
         );
     }
 

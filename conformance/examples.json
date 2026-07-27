@@ -11,8 +11,9 @@
       "id": "decorated-string-plus",
       "description": "my-num (=\"hi\") . plus 1",
       "expect": "reject",
-      "reason": "no attribute `plus` on bytes",
-      "guards": "width subtyping does not invent attributes the decoratee lacks"
+      "code": "type/unknown-attribute",
+      "reason": "no attribute `plus` on {@: string}",
+      "guards": "width subtyping does not invent attributes the decoratee lacks, and the object dispatched on is what gets blamed"
     },
     {
       "id": "recovered-fragile-number",
@@ -24,7 +25,8 @@
       "id": "unrecovered-fragile-plus",
       "description": "(fragile number) . plus 1",
       "expect": "reject",
-      "reason": "value can be ⊥ (bottom); recover it first",
+      "code": "type/not-recovered",
+      "reason": "value can be ⊥, so it has to be recovered before anything is dispatched on it",
       "guards": "the option discipline rejects plain dispatch on a maybe-⊥ value"
     },
     {
@@ -49,7 +51,8 @@
       "id": "bool-if-result-misuse",
       "description": "(bool.if 42 \"x\").plus 1",
       "expect": "reject",
-      "reason": "no attribute `plus` on bytes",
+      "code": "type/unknown-attribute",
+      "reason": "no attribute `plus` on string",
       "guards": "a requirement on a conditional's result is checked against every branch"
     },
     {
@@ -68,7 +71,8 @@
       "id": "requirement-broken-at-call-site",
       "description": "(main=[a]>a.plus 5) \"hi\"",
       "expect": "reject",
-      "reason": "no attribute `plus` on bytes",
+      "code": "type/unknown-attribute",
+      "reason": "no attribute `plus` on string",
       "guards": "the same requirement fails on a call site that cannot meet it"
     },
     {
@@ -90,6 +94,6 @@
     "rejected": 0,
     "smells": 5,
     "observed": "objectionary/eo at e57bb95771",
-    "note": "only `rejected` is asserted, and it must stay 0 whatever the object count grows to; `objects` and `smells` are the observed baseline, the latter from the second pass under EO_INCOMPLETE"
+    "note": "only `rejected` is asserted, and it must stay 0 whatever the object count grows to; `objects` and `smells` are the observed baseline, the latter from the second pass under --incomplete"
   }
 }
