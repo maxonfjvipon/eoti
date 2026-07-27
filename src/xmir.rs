@@ -406,6 +406,12 @@ fn site(el: Elem) -> Site {
     }
 }
 
+/// Whether a void states anything about itself: its own type, or the arguments
+/// its callback is handed.
+fn declares(el: Elem) -> bool {
+    el.attribute("type").is_some() || el.attribute("args").is_some()
+}
+
 /// Set an attribute, replacing whatever was bound under that name before.
 fn bind(binds: &mut Vec<(String, Node)>, label: &str, node: Node) {
     if let Some(slot) = binds.iter_mut().find(|(name, _)| name == label) {
@@ -417,10 +423,16 @@ fn bind(binds: &mut Vec<(String, Node)>, label: &str, node: Node) {
 
 /// A formation: either an atom that declares its whole type, or an object whose
 /// attributes get inferred.
+///
+/// An atom counts as fully declared once anything about it is written down that
+/// inference could not have worked out on its own: a return that quantifies, a
+/// void that states its own type, or a void that says what its callback is
+/// handed. Anything less and there is nothing to read, so the ordinary path
+/// types it from the return forma alone.
 fn formation(el: Elem) -> Node {
     let declared = elements(el).find_map(|child| child.attribute("atom"));
     if let Some(ret) = declared {
-        if generic(ret) || elements(el).any(|child| child.attribute("type").is_some()) {
+        if generic(ret) || elements(el).any(declares) {
             return Node::Atom {
                 voids: elements(el)
                     .filter(|child| child.attribute("base") == Some("∅"))
@@ -584,6 +596,20 @@ mod tests {
                 if ret.as_deref() == Some("A")
                     && matches!(voids.first().map(|v| &v.kind), Some(Kind::Own(own)) if own == "A?")),
             "a declared atom dont read its return type and its typed voids"
+        );
+    }
+
+    #[test]
+    fn reads_a_callbacks_argument_types_beside_a_concrete_return() {
+        let node = only(
+            r#"<p><o name="read"><o base="∅" name="offset"/>
+               <o base="∅" name="cant-read" args="Φ.string"/>
+               <o name="λ" atom="Φ.bytes"/></o></p>"#,
+        );
+        assert!(
+            matches!(node, Node::Atom { ref voids, .. }
+                if voids.iter().any(|void| matches!(&void.kind, Kind::Args(spec) if spec == "Φ.string"))),
+            "a callback void beside a concrete return dont keep its argument types"
         );
     }
 
