@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::render::{explain, show};
 use crate::solver::Clash;
 use crate::types::{Site, Types};
-use crate::xmir::Forma;
+use crate::xmir::{Broken, Trouble};
 
 /// The version of this document's shape.
 const SCHEMA: &str = "eo-type-diagnostics/1";
@@ -109,9 +109,15 @@ impl Report {
 }
 
 /// What has been found so far.
+///
+/// It counts objects apart from findings, because the two do not line up: one
+/// broken reference is a finding about no object at all, and one rejected object
+/// may be the only thing wrong with a file full of good ones.
 #[derive(Debug, Default)]
 pub struct Findings {
     objects: usize,
+    refused: usize,
+    flagged: usize,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -121,12 +127,22 @@ impl Findings {
         self.objects += 1;
     }
 
-    /// Note an object the checker rejected.
+    /// Note an object the checker would not type, and whether that stops a
+    /// build or merely deserves saying.
     pub fn rejected(&mut self, types: &Types, clash: &Clash) {
         self.objects += 1;
+        if clash.gates() {
+            self.refused += 1;
+        } else {
+            self.flagged += 1;
+        }
         let site = Self::site(clash);
         self.diagnostics.push(Diagnostic {
-            severity: Severity::Error,
+            severity: if clash.gates() {
+                Severity::Error
+            } else {
+                Severity::Warning
+            },
             code: clash.code(),
             loc: site.and_then(|site| site.loc.clone()),
             range: site.and_then(|site| site.at).map(|at| Range {
@@ -139,7 +155,12 @@ impl Findings {
     }
 
     /// Note a forma naming an object that is not there.
-    pub fn dangling(&mut self, forma: &Forma) {
+    pub fn dangling(&mut self, broken: &Broken) {
+        let Broken { forma, meant } = broken;
+        let mut detail = BTreeMap::from([("forma".to_owned(), forma.path.clone())]);
+        if let Some(meant) = meant {
+            detail.insert("meant".to_owned(), meant.clone());
+        }
         self.diagnostics.push(Diagnostic {
             severity: Severity::Error,
             code: "ref/dangling-forma",
@@ -148,8 +169,21 @@ impl Findings {
                 line: at.line,
                 pos: at.pos,
             }),
-            message: format!("forma `{}` names no object", forma.path),
-            detail: BTreeMap::from([("forma".to_owned(), forma.path.clone())]),
+            message: broken.to_string(),
+            detail,
+        });
+    }
+
+    /// Note an input the checker never got to look at. It gates: a gate that
+    /// waves through what it could not read is worse than no gate.
+    pub fn unreadable(&mut self, trouble: &Trouble) {
+        self.diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            code: "input/unreadable",
+            loc: None,
+            range: None,
+            message: trouble.to_string(),
+            detail: BTreeMap::new(),
         });
     }
 
@@ -160,6 +194,19 @@ impl Findings {
             .iter()
             .filter(|found| found.severity == Severity::Error)
             .count()
+    }
+
+    /// How many objects the checker would not type, of the ones that stop a
+    /// build.
+    #[must_use]
+    pub fn refused(&self) -> usize {
+        self.refused
+    }
+
+    /// How many objects were only flagged, which no build stops for.
+    #[must_use]
+    pub fn flagged(&self) -> usize {
+        self.flagged
     }
 
     /// Everything found, as a document.
@@ -229,9 +276,20 @@ impl Findings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Findings, Status};
+    use super::{Findings, Severity, Status};
     use crate::solver::Clash;
-    use crate::types::Types;
+    use crate::types::{Site, Types};
+    use crate::xmir::{Broken, Forma, Trouble};
+
+    /// The clash the object-level fragility pass raises, which is a smell rather
+    /// than a shape error.
+    fn smell() -> Clash {
+        Clash::IncompleteDispatch {
+            unset: "uri".to_owned(),
+            attribute: "separator".to_owned(),
+            site: Site::default(),
+        }
+    }
 
     #[test]
     fn says_a_clean_run_may_go_on() {
@@ -288,6 +346,78 @@ mod tests {
                 .json()
                 .contains("\"status\": \"ok\""),
             "the report dont write the one field a compiler gates on"
+        );
+    }
+
+    #[test]
+    fn lets_a_build_go_on_over_a_design_smell() {
+        let mut findings = Findings::default();
+        findings.rejected(&Types::default(), &smell());
+        assert_eq!(
+            findings.report("somewhere").status,
+            Status::Ok,
+            "a half-built object dont let the build it only smells to go on"
+        );
+    }
+
+    #[test]
+    fn counts_a_design_smell_among_the_warnings() {
+        let mut findings = Findings::default();
+        findings.rejected(&Types::default(), &smell());
+        assert_eq!(
+            findings.report("somewhere").summary.warnings,
+            1,
+            "a finding that stops nothing dont count as a warning"
+        );
+    }
+
+    #[test]
+    fn says_a_design_smell_is_only_worth_saying() {
+        let mut findings = Findings::default();
+        findings.rejected(&Types::default(), &smell());
+        assert_eq!(
+            findings.report("somewhere").diagnostics[0].severity,
+            Severity::Warning,
+            "a design smell dont carry the severity that spares a build"
+        );
+    }
+
+    #[test]
+    fn keeps_an_object_it_only_flagged_out_of_the_refusals() {
+        let mut findings = Findings::default();
+        findings.rejected(&Types::default(), &smell());
+        assert_eq!(
+            findings.refused(),
+            0,
+            "an object that was only flagged dont stay out of the refusals"
+        );
+    }
+
+    #[test]
+    fn stops_a_build_it_could_not_even_read_the_input_of() {
+        let mut findings = Findings::default();
+        findings.unreadable(&Trouble::Malformed("foo.xmir: unknown token".to_owned()));
+        assert_eq!(
+            findings.report("somewhere").status,
+            Status::Errors,
+            "an input nobody could read dont stop the build that waved it through"
+        );
+    }
+
+    #[test]
+    fn says_what_a_forma_that_dropped_its_root_was_meant_to_name() {
+        let mut findings = Findings::default();
+        findings.dangling(&Broken {
+            forma: Forma {
+                path: "Φ.return".to_owned(),
+                site: Site::default(),
+            },
+            meant: Some("Φ.posix.return".to_owned()),
+        });
+        assert_eq!(
+            findings.report("somewhere").diagnostics[0].message,
+            "forma `Φ.return` names no object, though `Φ.posix.return` does",
+            "a broken forma dont say what it was meant to name"
         );
     }
 }

@@ -67,8 +67,19 @@ impl Clash {
             Self::NotRecovered => "type/not-recovered",
             Self::IncompleteDispatch { .. } => "type/incomplete-dispatch",
             Self::NoAttributes { .. } | Self::Mismatch { .. } => "type/argument-mismatch",
-            Self::Unbound { .. } => "ref/dangling-forma",
+            Self::Unbound { .. } => "ref/unbound-name",
         }
+    }
+
+    /// Whether a failure is worth stopping a build over.
+    ///
+    /// All but one are: a shape that cannot fit is a mistake the program would
+    /// pay for at run time. An incomplete object is the exception, because it
+    /// passes the shape check — dispatching on a half-built object is a design
+    /// smell, worth saying and not worth failing on.
+    #[must_use]
+    pub fn gates(&self) -> bool {
+        !matches!(self, Self::IncompleteDispatch { .. })
     }
 }
 
@@ -495,7 +506,7 @@ impl Solver {
             self.needs.insert((label.to_owned(), want), node);
             node
         };
-        if let Type::Rec(shape) = types.at(node) {
+        if let (true, Type::Rec(shape)) = (site.known(), types.at(node)) {
             types.mark(shape, site.clone());
         }
         node
@@ -594,7 +605,7 @@ impl Default for Solver {
 #[cfg(test)]
 mod tests {
     use super::{Clash, Solver};
-    use crate::types::{Level, Type, TypeId, Types};
+    use crate::types::{Level, Site, Type, TypeId, Types};
 
     /// A ground shape standing in for a built-in, named the way the engine names
     /// one so that instantiation shares it.
@@ -918,6 +929,39 @@ mod tests {
             Clash::NotRecovered.code(),
             "type/not-recovered",
             "a failure dont carry the machine string a gate reads"
+        );
+    }
+
+    #[test]
+    fn tells_an_unbound_name_apart_from_a_broken_forma() {
+        assert_eq!(
+            Clash::Unbound {
+                name: "whatever".to_owned(),
+            }
+            .code(),
+            "ref/unbound-name",
+            "a name that stands for nothing dont keep a code of its own"
+        );
+    }
+
+    #[test]
+    fn stops_a_build_over_a_shape_that_cannot_fit() {
+        assert!(
+            Clash::NotRecovered.gates(),
+            "a value that can be bottom dont stop a build"
+        );
+    }
+
+    #[test]
+    fn spares_a_build_the_smell_of_a_half_built_object() {
+        assert!(
+            !Clash::IncompleteDispatch {
+                unset: "uri".to_owned(),
+                attribute: "separator".to_owned(),
+                site: Site::default(),
+            }
+            .gates(),
+            "dispatching on a half-built object dont pass the gate it only smells to"
         );
     }
 }

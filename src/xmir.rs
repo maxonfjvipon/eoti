@@ -128,6 +128,15 @@ pub enum Trouble {
     Malformed(String),
 }
 
+impl std::fmt::Display for Trouble {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(what) => write!(out, "cannot read {what}"),
+            Self::Malformed(what) => write!(out, "cannot parse {what}"),
+        }
+    }
+}
+
 /// Every top-level object of one XMIR file, with the name it was given.
 ///
 /// # Errors
@@ -184,6 +193,26 @@ pub struct Forma {
     pub site: Site,
 }
 
+/// A forma that names nothing, and what it was probably meant to name.
+#[derive(Clone, Debug)]
+pub struct Broken {
+    /// The claim that cannot be resolved.
+    pub forma: Forma,
+    /// The object it would have named had it been rooted at the one declaring
+    /// it, when that names something real.
+    pub meant: Option<String>,
+}
+
+impl std::fmt::Display for Broken {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "forma `{}` names no object", self.forma.path)?;
+        match &self.meant {
+            Some(meant) => write!(out, ", though `{meant}` does"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Every locator that exists, and every forma that claims one.
 ///
 /// This is all the dangling-forma lint needs, and it needs no inference at all:
@@ -198,13 +227,45 @@ pub struct Survey {
 }
 
 impl Survey {
-    /// The formas that name nothing.
+    /// The formas that name nothing, of the ones the input can answer for.
+    ///
+    /// A forma whose object lives in a file nobody passed is unknown, not
+    /// broken, and stays quiet — the same leniency the walker shows an
+    /// unmodelled atom, and for the same reason: a checker that invents an
+    /// error is worse than one that misses it. What is left is the two shapes
+    /// the input really does answer for.
     #[must_use]
-    pub fn dangling(&self) -> Vec<&Forma> {
+    pub fn dangling(&self) -> Vec<Broken> {
         self.claimed
             .iter()
             .filter(|forma| !self.known.contains(&forma.path))
+            .filter_map(|forma| {
+                let meant = self.relative(forma);
+                (meant.is_some() || self.reaches(&forma.path)).then(|| Broken {
+                    forma: forma.clone(),
+                    meant,
+                })
+            })
             .collect()
+    }
+
+    /// Whether a forma reaches into an object the input carries: some ancestor
+    /// of it is right here, so the object it names would be here too.
+    fn reaches(&self, path: &str) -> bool {
+        let segments: Vec<&str> = path.split('.').collect();
+        (2..segments.len()).any(|cut| self.known.contains(&segments[..cut].join(".")))
+    }
+
+    /// The object a forma would have named had it been written relative to the
+    /// object declaring it: `Φ.return` inside `Φ.posix` meaning
+    /// `Φ.posix.return`. Nothing else explains a forma whose root is absent
+    /// while the very same tail sits under the object that claims it.
+    fn relative(&self, forma: &Forma) -> Option<String> {
+        let tail = forma.path.strip_prefix("Φ.")?;
+        let segments: Vec<&str> = forma.site.loc.as_deref()?.split('.').collect();
+        (2..=segments.len())
+            .map(|cut| format!("{}.{tail}", segments[..cut].join(".")))
+            .find(|under| self.known.contains(under))
     }
 }
 
@@ -221,27 +282,32 @@ pub fn survey(paths: &[impl AsRef<Path>]) -> Survey {
         let Ok(document) = Document::parse(&text) else {
             continue;
         };
-        for object in document.descendants().filter(|el| el.has_tag_name("o")) {
-            if let Some(loc) = object.attribute("loc") {
-                found.known.insert(loc.to_owned());
-            }
-            let here = site(object);
-            for annotation in ["atom", "type", "args"] {
-                let Some(text) = object.attribute(annotation) else {
-                    continue;
-                };
-                for claim in text.split_whitespace() {
-                    if let Some(path) = rooted(claim) {
-                        found.claimed.push(Forma {
-                            path,
-                            site: here.clone(),
-                        });
-                    }
+        glean(document.root_element(), &mut found);
+    }
+    found
+}
+
+/// Note what one document says exists and what it claims exists.
+fn glean(root: Elem, found: &mut Survey) {
+    for object in root.descendants().filter(|el| el.has_tag_name("o")) {
+        if let Some(loc) = object.attribute("loc") {
+            found.known.insert(loc.to_owned());
+        }
+        let here = site(object);
+        for annotation in ["atom", "type", "args"] {
+            let Some(text) = object.attribute(annotation) else {
+                continue;
+            };
+            for claim in text.split_whitespace() {
+                if let Some(path) = rooted(claim) {
+                    found.claimed.push(Forma {
+                        path,
+                        site: here.clone(),
+                    });
                 }
             }
         }
     }
-    found
 }
 
 /// The object a single annotation claims, when it claims one at all. A generic
@@ -547,6 +613,71 @@ mod tests {
         assert!(
             generic("C") && !generic("G"),
             "the letters that quantify dont stop at F"
+        );
+    }
+
+    /// One file's worth of survey, written out so a lint case reads as the XMIR
+    /// it is about rather than as a set of handles.
+    fn surveyed(xml: &str) -> super::Survey {
+        let mut found = super::Survey::default();
+        let document = Document::parse(xml).expect("the fixture is not well-formed");
+        super::glean(document.root_element(), &mut found);
+        found
+    }
+
+    #[test]
+    fn faults_a_forma_reaching_into_an_object_that_lacks_it() {
+        assert_eq!(
+            surveyed(
+                r#"<p><o name="posix" loc="Φ.posix"><o name="λ" atom="Φ.posix.nowhere"
+                   loc="Φ.posix.λ"/></o></p>"#
+            )
+            .dangling()
+            .first()
+            .map(|broken| broken.forma.path.clone()),
+            Some("Φ.posix.nowhere".to_owned()),
+            "a forma reaching into an object right here dont get faulted"
+        );
+    }
+
+    #[test]
+    fn says_what_a_forma_left_off_its_root_was_meant_to_name() {
+        assert_eq!(
+            surveyed(
+                r#"<p><o name="posix" loc="Φ.posix"><o name="return" loc="Φ.posix.return"/>
+                   <o name="λ" atom="Φ.return" loc="Φ.posix.λ"/></o></p>"#
+            )
+            .dangling()
+            .first()
+            .and_then(|broken| broken.meant.clone()),
+            Some("Φ.posix.return".to_owned()),
+            "a forma that dropped its root dont get told what it was meant to name"
+        );
+    }
+
+    #[test]
+    fn stays_quiet_about_a_forma_whose_file_nobody_passed() {
+        assert!(
+            surveyed(
+                r#"<p><o name="number" loc="Φ.number"><o name="λ" atom="Φ.bool"
+                   loc="Φ.number.λ"/></o></p>"#
+            )
+            .dangling()
+            .is_empty(),
+            "a forma naming an object from a file nobody passed dont go unaccused"
+        );
+    }
+
+    #[test]
+    fn takes_no_issue_with_a_forma_that_resolves() {
+        assert!(
+            surveyed(
+                r#"<p><o name="posix" loc="Φ.posix"><o name="return" loc="Φ.posix.return"/>
+                   <o name="λ" atom="Φ.posix.return" loc="Φ.posix.λ"/></o></p>"#
+            )
+            .dangling()
+            .is_empty(),
+            "a forma that names a real object dont pass the lint"
         );
     }
 }

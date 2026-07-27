@@ -7,7 +7,7 @@ use clap::Parser;
 use eoti::diag::Findings;
 use eoti::infer::{Engine, Env};
 use eoti::render::{explain, show};
-use eoti::xmir;
+use eoti::xmir::{self, Broken};
 
 /// What the checker was asked to look at.
 #[derive(Parser)]
@@ -54,8 +54,9 @@ fn check(args: Args) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let mut findings = Findings::default();
-    for forma in xmir::survey(&files).dangling() {
-        findings.dangling(forma);
+    let dangling = xmir::survey(&files).dangling();
+    for broken in &dangling {
+        findings.dangling(broken);
     }
     for path in &files {
         if !json {
@@ -65,59 +66,64 @@ fn check(args: Args) -> ExitCode {
             Ok(objects) => objects,
             Err(trouble) => {
                 if !json {
-                    println!("  (unreadable) {trouble:?}");
+                    println!("  {trouble}");
                 }
+                findings.unreadable(&trouble);
                 continue;
             }
         };
         for (name, node) in objects {
+            let name = name.unwrap_or_else(|| "?".to_owned());
             match engine.infer(&node, &Env::new()) {
                 Ok(ty) => {
                     findings.typed();
                     if !json {
-                        println!(
-                            "  {} : {}",
-                            name.unwrap_or_else(|| "?".to_owned()),
-                            show(&engine.types, ty)
-                        );
+                        println!("  {name} : {}", show(&engine.types, ty));
                     }
                 }
                 Err(clash) => {
-                    findings.rejected(&engine.types, &clash);
                     if !json {
                         println!(
-                            "  {} : REJECT -- {}",
-                            name.unwrap_or_else(|| "?".to_owned()),
+                            "  {name} : {} -- {}",
+                            if clash.gates() { "REJECT" } else { "WARN" },
                             explain(&engine.types, &clash)
                         );
                     }
+                    findings.rejected(&engine.types, &clash);
                 }
             }
         }
     }
-    let broken = findings.errors();
+    let (broken, refused, flagged) = (findings.errors(), findings.refused(), findings.flagged());
     let report = findings.report(&common(&files));
     if json {
         println!("{}", report.json());
     } else {
-        println!();
-        for found in &report.diagnostics {
-            if found.code == "ref/dangling-forma" {
-                println!("  {} -- {}", found.code, found.message);
-            }
-        }
-        println!(
-            "{} object(s), {} typed, {} rejected",
-            report.summary.objects,
-            report.summary.objects - report.summary.errors,
-            report.summary.errors
-        );
+        summarize(report.summary.objects, &dangling, refused, flagged);
     }
     if broken > 0 {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The last word of a human-readable run: the broken references, which sit under
+/// no object of their own, and then the counts.
+fn summarize(objects: usize, dangling: &[Broken], refused: usize, flagged: usize) {
+    println!();
+    for broken in dangling {
+        println!("  {broken}");
+    }
+    println!(
+        "{objects} object(s), {} typed, {refused} rejected{}",
+        objects - refused - flagged,
+        if flagged > 0 {
+            format!(", {flagged} flagged")
+        } else {
+            String::new()
+        }
+    );
 }
 
 /// The directory the inputs share, which is what a consumer means by the source

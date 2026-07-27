@@ -138,6 +138,17 @@ pub struct Site {
     pub loc: Option<String>,
 }
 
+impl Site {
+    /// Whether anything at all is known about where something was written.
+    ///
+    /// Worth asking before recording it over a place already known: an input
+    /// that carries no position must not blank one that does.
+    #[must_use]
+    pub fn known(&self) -> bool {
+        self.at.is_some() || self.loc.is_some()
+    }
+}
+
 /// An object shape.
 #[derive(Debug)]
 struct RecData {
@@ -672,6 +683,26 @@ mod tests {
             types.site(copy).loc.as_deref(),
             Some("Φ.somewhere"),
             "a copied shape dont remember which object the original stood for"
+        );
+    }
+
+    #[test]
+    fn knows_nothing_about_a_place_nobody_recorded() {
+        assert!(
+            !Site::default().known(),
+            "a place nobody recorded dont admit it knows nothing"
+        );
+    }
+
+    #[test]
+    fn knows_a_place_named_by_its_locator_alone() {
+        assert!(
+            Site {
+                at: None,
+                loc: Some("Φ.somewhere".to_owned()),
+            }
+            .known(),
+            "a place known only by its locator dont count as known"
         );
     }
 
