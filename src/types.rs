@@ -614,6 +614,19 @@ mod tests {
     }
 
     #[test]
+    fn an_applied_shape_claims_no_definition_level() {
+        let mut types = Types::default();
+        let shape = types.rec(vec!["x".to_owned()]);
+        types.define(shape, Level::default().deeper());
+        let filled = types.applied(shape);
+        assert_eq!(
+            types.defined_at(filled),
+            None,
+            "an applied shape dont drop the definition level of the shape it came from"
+        );
+    }
+
+    #[test]
     fn a_shell_keeps_the_slots_but_none_of_the_attributes() {
         let mut types = Types::default();
         let shape = types.rec(vec!["x".to_owned()]);

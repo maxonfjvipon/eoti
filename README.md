@@ -62,15 +62,15 @@ cargo clippy --all-targets -- -D warnings
 # 1) Type-check XMIR files: one line per top-level object, its type or REJECT.
 eoti path/to/foo.xmir path/to/bar.xmir
 
-# 2) Machine-readable diagnostics for a build gate or an editor (§5b).
-eoti --json path/to/*.xmir
-
-# 3) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
+# 2) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
 eoti --atoms path/to/*.xmir
 
-# 4) The whole-runtime conformance test, against an EO checkout (§4).
+# 3) The whole-runtime conformance test, against an EO checkout (§4).
 EO_HOME=/path/to/eo cargo test --test runtime
 ```
+
+There is no `--json` yet. The machine format of §5b is designed and not emitted;
+that is the next thing to build (§13).
 
 Flag:
 
@@ -134,8 +134,13 @@ Notes:
 
 ### 5a. Human-readable output
 
-- **stdout, per file:** a `== <path> ==` header, then one line per top-level object: `name : <type>` or `name : REJECT -- <reason>`.
-- **over a whole tree:** a Markdown report — summary table (objects / typed OK / rejected / incompleteness smells), grouped rejection reasons, the object-level smell list, and the full per-object listing.
+- **stdout, per file:** a `== <path> ==` header, then one line per top-level object: `name : <type>` or `name : REJECT -- <code> <detail>`.
+- **exit status:** `0` when nothing was rejected, `1` when something was, `2` when there was nothing to check.
+
+A rejection currently prints its stable code and its structured detail rather than
+a sentence, because the solver deliberately does not build prose (§12). Turning
+that detail into a message is part of §5b, and so is the summary report over a
+whole tree — neither is written yet.
 
 Types are rendered in **named-binder** form: variables named once, single-use ones inlined, the rest in a trailing `where` clause, open variables `∀`-quantified. Concrete positions are shown by their object name (e.g. `number`); positions resolved via `@loc` show the object's shape.
 
