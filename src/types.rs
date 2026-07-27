@@ -12,8 +12,6 @@
 //! owns anything twice, and each window of mutation provably closes before the
 //! next descent.
 
-use std::collections::HashMap;
-
 /// How local an unknown is. Deeper means more local, which is what lets a
 /// reused object's parameters go fresh per use while its recursion and context
 /// stay shared.
@@ -25,6 +23,12 @@ impl Level {
     #[must_use]
     pub fn deeper(self) -> Self {
         Self(self.0 + 1)
+    }
+
+    /// One step less local, or nothing at all at the outermost level.
+    #[must_use]
+    pub fn shallower(self) -> Option<Self> {
+        self.0.checked_sub(1).map(Self)
     }
 }
 
@@ -39,6 +43,13 @@ pub struct VarId(usize);
 /// A record in the arena.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RecId(usize);
+
+/// A table of attributes in the arena. Records name one rather than owning one,
+/// because filling a void yields a shape with the same attributes and one fewer
+/// slot, and the two must stay the same table: the original may still be gaining
+/// attributes while the reduced one is already in use.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct FieldsId(usize);
 
 /// A base type. In EO the only inhabitant is `bytes`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -107,12 +118,21 @@ impl Fields {
     }
 }
 
+/// Where a shape came from: its position in the source, and the level it was
+/// defined at, which a use site needs in order to know what to make fresh.
+#[derive(Clone, Copy, Debug, Default)]
+struct Origin {
+    line: Option<u32>,
+    level: Option<Level>,
+}
+
 /// An object shape.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RecData {
-    fields: Fields,
+    fields: FieldsId,
     voids: Vec<String>,
     alias: Option<String>,
+    origin: Origin,
 }
 
 /// The arena every type lives in.
@@ -124,6 +144,7 @@ pub struct Types {
     nodes: Vec<Type>,
     vars: Vec<VarData>,
     recs: Vec<RecData>,
+    tables: Vec<Fields>,
 }
 
 impl Types {
@@ -171,11 +192,98 @@ impl Types {
 
     /// A fresh record expecting these voids, in application order.
     pub fn rec(&mut self, voids: Vec<String>) -> RecId {
-        self.recs.push(RecData {
+        let fields = self.table();
+        self.hold(RecData {
+            fields,
             voids,
-            ..RecData::default()
-        });
-        RecId(self.recs.len() - 1)
+            alias: None,
+            origin: Origin::default(),
+        })
+    }
+
+    /// The same shape with no attributes yet: its name, its slots and where it
+    /// came from, ready for a copy to fill.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was not made by this arena.
+    pub fn shell(&mut self, like: RecId) -> RecId {
+        let fields = self.table();
+        let (voids, alias, origin) = {
+            let data = self.rec_at(like);
+            (data.voids.clone(), data.alias.clone(), data.origin)
+        };
+        self.hold(RecData {
+            fields,
+            voids,
+            alias,
+            origin,
+        })
+    }
+
+    /// The same shape with its first void filled: one fewer slot, and the very
+    /// same attributes, so whatever the original gains later is seen here too.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was not made by this arena, or the shape has no void left.
+    pub fn applied(&mut self, rec: RecId) -> RecId {
+        let (fields, voids, alias, origin) = {
+            let data = self.rec_at(rec);
+            assert!(!data.voids.is_empty(), "the shape has no void left to fill");
+            (
+                data.fields,
+                data.voids[1..].to_vec(),
+                data.alias.clone(),
+                data.origin,
+            )
+        };
+        self.hold(RecData {
+            fields,
+            voids,
+            alias,
+            origin,
+        })
+    }
+
+    /// Where in the source a shape was written, when it stands for a
+    /// requirement that can be pointed at.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was not made by this arena.
+    #[must_use]
+    pub fn line(&self, rec: RecId) -> Option<u32> {
+        self.rec_at(rec).origin.line
+    }
+
+    /// Say where in the source a shape was written.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was not made by this arena.
+    pub fn mark(&mut self, rec: RecId, line: u32) {
+        self.rec_mut(rec).origin.line = Some(line);
+    }
+
+    /// The level a formation was defined at. Instantiation makes everything
+    /// deeper than this fresh, and shares everything at or above it.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was not made by this arena.
+    #[must_use]
+    pub fn defined_at(&self, rec: RecId) -> Option<Level> {
+        self.rec_at(rec).origin.level
+    }
+
+    /// Say what level a formation was defined at.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was not made by this arena.
+    pub fn define(&mut self, rec: RecId, level: Level) {
+        self.rec_mut(rec).origin.level = Some(level);
     }
 
     /// How local an unknown is.
@@ -253,7 +361,7 @@ impl Types {
     /// If the handle was not made by this arena.
     #[must_use]
     pub fn field(&self, rec: RecId, label: &str) -> Option<TypeId> {
-        self.rec_at(rec).fields.at(label)
+        self.table_at(rec).at(label)
     }
 
     /// Give a record an attribute, replacing it if the label is taken.
@@ -262,7 +370,11 @@ impl Types {
     ///
     /// If the handle was not made by this arena.
     pub fn bind(&mut self, rec: RecId, label: &str, ty: TypeId) {
-        self.rec_mut(rec).fields.bind(label, ty);
+        let table = self.rec_at(rec).fields;
+        self.tables
+            .get_mut(table.0)
+            .expect("no such attribute table in this arena")
+            .bind(label, ty);
     }
 
     /// Every attribute of a record, in the order they were bound.
@@ -271,8 +383,7 @@ impl Types {
     ///
     /// If the handle was not made by this arena.
     pub fn labels(&self, rec: RecId) -> impl Iterator<Item = (&str, TypeId)> {
-        self.rec_at(rec)
-            .fields
+        self.table_at(rec)
             .0
             .iter()
             .map(|(label, ty)| (label.as_str(), *ty))
@@ -337,12 +448,23 @@ impl Types {
             .get_mut(rec.0)
             .expect("no such shape in this arena")
     }
-}
 
-/// A memo from one arena handle to another, as instantiation and extrusion both
-/// need when they copy a type: the copy must preserve sharing, so a handle seen
-/// twice maps to one replacement.
-pub type Memo = HashMap<TypeId, TypeId>;
+    fn table_at(&self, rec: RecId) -> &Fields {
+        self.tables
+            .get(self.rec_at(rec).fields.0)
+            .expect("no such attribute table in this arena")
+    }
+
+    fn table(&mut self) -> FieldsId {
+        self.tables.push(Fields::default());
+        FieldsId(self.tables.len() - 1)
+    }
+
+    fn hold(&mut self, data: RecData) -> RecId {
+        self.recs.push(data);
+        RecId(self.recs.len() - 1)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -462,6 +584,59 @@ mod tests {
             types.alias(number),
             Some("number"),
             "a named builtin dont carry the name it was given"
+        );
+    }
+
+    #[test]
+    fn applying_a_shape_drops_its_first_slot() {
+        let mut types = Types::default();
+        let shape = types.rec(vec!["head".to_owned(), "tail".to_owned()]);
+        let filled = types.applied(shape);
+        assert_eq!(
+            types.voids(filled),
+            ["tail".to_owned()],
+            "filling a slot dont leave the rest of them"
+        );
+    }
+
+    #[test]
+    fn an_applied_shape_sees_attributes_the_original_gains_later() {
+        let mut types = Types::default();
+        let shape = types.rec(vec!["x".to_owned()]);
+        let filled = types.applied(shape);
+        let bytes = types.bytes();
+        types.bind(shape, "later", bytes);
+        assert_eq!(
+            types.field(filled, "later"),
+            Some(bytes),
+            "an applied shape dont share the attributes of the shape it came from"
+        );
+    }
+
+    #[test]
+    fn a_shell_keeps_the_slots_but_none_of_the_attributes() {
+        let mut types = Types::default();
+        let shape = types.rec(vec!["x".to_owned()]);
+        let bytes = types.bytes();
+        types.bind(shape, "φ", bytes);
+        let empty = types.shell(shape);
+        assert_eq!(
+            (types.voids(empty).len(), types.field(empty, "φ")),
+            (1, None),
+            "a shell dont keep the slots while dropping the attributes"
+        );
+    }
+
+    #[test]
+    fn remembers_where_a_requirement_was_written() {
+        let mut types = Types::default();
+        let shape = types.rec(Vec::new());
+        types.mark(shape, 41);
+        let copy = types.shell(shape);
+        assert_eq!(
+            types.line(copy),
+            Some(41),
+            "a copied shape dont remember where the original was written"
         );
     }
 
