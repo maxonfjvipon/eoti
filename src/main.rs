@@ -19,8 +19,7 @@ struct Args {
 
 fn main() -> ExitCode {
     eprintln!(
-        "the inference engine is not ported yet, {} file(s) left unchecked; \
-         run reference/eo_type_inference.py meanwhile",
+        "the inference engine is not built yet, {} file(s) left unchecked",
         Args::parse().files.len()
     );
     ExitCode::from(2)

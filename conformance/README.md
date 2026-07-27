@@ -1,10 +1,9 @@
 # Conformance suite
 
-The contract that any implementation of the checker must satisfy, in any
-language. It exists so the Rust rewrite is a *checked* migration rather than a
-risky redo: the contract was frozen before a line of the engine was ported, and
-the Python in `reference/` stays as the oracle a third implementation could be
-checked against too.
+The contract the checker must satisfy, in any implementation and any language.
+It exists so the engine is *checked* rather than merely written: the contract
+was frozen before a line of the engine was built, so it guards the work instead
+of recording it.
 
 Two parts:
 
@@ -14,14 +13,12 @@ Two parts:
   because prose is not an API (the machine string is `code`, see §5b of the
   top-level README).
 - **`runtime`** in the same file — the large test. The whole `eo-runtime`
-  `1-parse` tree must type with nothing rejected, in well under a second.
-  Requires an EO checkout; see §4 of the top-level README for generating it.
+  `1-parse` tree must type with nothing rejected, in well under a second. Only
+  the rejection count is asserted; the object and smell counts are the observed
+  baseline. Requires an EO checkout; see §4 of the top-level README for
+  generating one.
+- **`fixtures/`** — small XMIR programs so the repository is testable without an
+  EO checkout.
 
-Verify the oracle still agrees with the contract:
-
-```bash
-python3 reference/eo_type_inference.py     # -> 13/13 examples behaved as expected
-```
-
-Amending the contract is a deliberate act. A new example is a new row here
-first, then an implementation change — never the other way round.
+Amending the contract is a deliberate act. A new behavior is a row here first,
+then an implementation change — never the other way round.

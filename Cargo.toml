@@ -11,7 +11,7 @@ repository = "https://github.com/maxonfjvipon/eoti"
 homepage = "https://github.com/maxonfjvipon/eoti"
 keywords = ["eolang", "xmir", "type-inference", "type-checker", "mlsub"]
 categories = ["development-tools", "compilers"]
-exclude = ["/docs/*.pdf", "/reference", "/.github"]
+exclude = ["/docs/*.pdf", "/.oracle", "/.github"]
 
 [lib]
 name = "eoti"

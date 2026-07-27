@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Run the EO type-inference reference implementation against every XMIR in the
-# parser's 1-parse output tree and write a Markdown report.
+# Run the oracle against every XMIR in the parser's 1-parse output tree and
+# write a Markdown report.
 #
-#   ./reference/run.sh [source-dir] [output-file]
+#   ./.oracle/run.sh [source-dir] [output-file]
 #
 # Defaults:
 #   source-dir  = $EO_HOME/eo-runtime/target/eo/1-parse

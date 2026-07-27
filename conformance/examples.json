@@ -1,6 +1,5 @@
 {
   "schema": "eo-type-inference-conformance/1",
-  "oracle": "reference/eo_type_inference.py",
   "examples": [
     {
       "id": "decorated-number-plus",

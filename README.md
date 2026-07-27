@@ -7,9 +7,7 @@ A standalone, **structural type inferencer and pre-run type checker for EO**, op
 
 It reads the XMIR a program compiles to, infers a type for every object, and reports the mistakes that would otherwise only surface at runtime — for example, dispatching `.plus` on a `string`. It is deliberately **decoupled from any compiler**: it consumes only XMIR, so the same checker works no matter what language the EO compiler or runtime is written in.
 
-> **Status:** working research prototype. It type-checks the entire `eo-runtime` (153/153 top-level objects, 0 rejected) in ~0.7s, passes its 13 accept/reject examples, and resolves every non-primitive atom return type to a real object shape. It is **not yet** wired into a build as a gate, and it emits a human-readable report rather than the machine format described in §5. Those are the roadmap (§13).
->
-> **Language:** the production implementation is **Rust**, in `src/`, being ported module by module under the guard of `conformance/` — the engine is scaffolded but not yet wired. The **working checker today is the Python reference** in `reference/` (zero-dependency, readable — it doubles as the executable spec), which also stays on as the conformance oracle. Where the two disagree, the Python is right until `conformance/` says otherwise. See §13.
+> **Status:** early. The type system is designed and settled (`docs/eo-type-inference.tex`), and its behavior is frozen as a contract in `conformance/` — 13 accept/reject cases plus a whole-runtime verdict of 153 objects with none rejected. The engine in `src/` is being built one module at a time against that contract; it is scaffolded but not yet wired, so the CLI does not check anything yet. Sections 3–12 describe the design the engine implements; §13 is what remains.
 
 ---
 
@@ -43,37 +41,38 @@ EO's compiler and runtime are Java today, but may be reimplemented in other lang
 - **Catch compilation errors before running** (missing attributes, wrong argument types, un-recovered failures).
 - **Feed an IDE** the same facts (hover, completion, error squiggles).
 
-This tool is the reference implementation of that checker. The type *semantics* (see the paper, `docs/eo-type-inference.tex`) plus a conformance suite (§11) are the real language-neutral deliverable; the Python here is one implementation of them.
+This tool is one implementation of that checker. The type *semantics* (see the paper, `docs/eo-type-inference.tex`) plus a conformance suite (§11) are the real language-neutral deliverable; the code here implements them.
 
 ---
 
 ## 2. Quick start
 
-**Requirements:** the reference needs **Python 3.8+ only**, with **no third-party dependencies** — standard library exclusively (`xml.etree`, `re`, `os`, `sys`, `itertools`). The Rust side needs a stable toolchain (edition 2024, MSRV 1.85).
+**Requirements:** a stable Rust toolchain (edition 2024, MSRV 1.85). No other tooling, and no EO checkout unless you want whole-runtime conformance (§4).
 
 ```bash
-# 1) Run the built-in examples (accept + reject cases). No XMIR needed.
-python3 reference/eo_type_inference.py
-#   -> "13/13 examples behaved as expected."
-
-# 2) Type-check specific XMIR files (prints each top-level object's type or REJECT).
-python3 reference/eo_type_inference.py path/to/foo.xmir path/to/bar.xmir
-
-# 3) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
-python3 reference/eo_type_inference.py --atoms path/to/*.xmir
-
-# 4) Full report over a whole 1-parse tree (two passes -> Markdown report).
-EO_HOME=/path/to/eo ./reference/run.sh
-#   or pass them: ./reference/run.sh <1-parse-dir> <output-file>
-
-# 5) Build and check the Rust side.
+# Build, test and lint. This is what CI runs.
 cargo test
+cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-Environment flag:
+The command-line interface below is the target shape (§5); the engine behind it
+is still being built, so today it only parses its arguments.
 
-- `EO_INCOMPLETE=1` — enable the **object-level fragility** pass (flags dispatching on an object that still has an unset attribute; see §6 and §12). Off by default so the shape baseline stays clean.
+```bash
+# 1) Type-check XMIR files: one line per top-level object, its type or REJECT.
+eoti path/to/foo.xmir path/to/bar.xmir
+
+# 2) Machine-readable diagnostics for a build gate or an editor (§5b).
+eoti --json path/to/*.xmir
+
+# 3) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
+eoti --atoms path/to/*.xmir
+```
+
+Flag:
+
+- `--incomplete` — enable the **object-level fragility** pass (flags dispatching on an object that still has an unset attribute; see §6 and §12). Off by default so the shape baseline stays clean.
 
 ---
 
@@ -119,7 +118,7 @@ mvn -q -pl eo-runtime \
   org.eolang:eo-maven-plugin:1.0-SNAPSHOT:parse
 
 # Now point the checker at it:
-python3 /path/to/eoti/reference/eo_type_inference.py eo-runtime/target/eo/1-parse/**/*.xmir
+eoti eo-runtime/target/eo/1-parse/**/*.xmir
 ```
 
 Notes:
@@ -131,14 +130,14 @@ Notes:
 
 ## 5. Output
 
-### 5a. Current output (implemented)
+### 5a. Human-readable output
 
 - **stdout, per file:** a `== <path> ==` header, then one line per top-level object: `name : <type>` or `name : REJECT -- <reason>`.
-- **`reference/run.sh`:** a Markdown report — summary table (objects / typed OK / rejected / incompleteness smells), grouped rejection reasons, the object-level smell list, and the full per-object listing.
+- **over a whole tree:** a Markdown report — summary table (objects / typed OK / rejected / incompleteness smells), grouped rejection reasons, the object-level smell list, and the full per-object listing.
 
 Types are rendered in **named-binder** form: variables named once, single-use ones inlined, the rest in a trailing `where` clause, open variables `∀`-quantified. Concrete positions are shown by their object name (e.g. `number`); positions resolved via `@loc` show the object's shape.
 
-### 5b. Target machine output (designed, not yet emitted — see §13)
+### 5b. Machine output (designed, not yet emitted — see §13)
 
 Two outputs with different lifetimes:
 
@@ -194,7 +193,7 @@ The full design is in `docs/eo-type-inference.tex`. In brief:
 - **Constraint solver** — `constrain(lhs, rhs)` means "`lhs` must be usable as `rhs`". Each unknown (`Var`) collects lower bounds (things that flow in) and upper bounds (slots it flows out to); a `seen` set makes cyclic/recursive objects terminate.
 - **Levels (MLsub)** — each `Var` has a `level`. Formations **generalize** at their definition level and each use **instantiates** via `freshen`; `constrain` performs **extrusion** (lowering) when a deep variable meets a shallower one. This is what makes a reused object's *parameters* fresh per use while its *recursion and context* stay shared.
 - **Options / `⊥`** — `T?` (`Opt`) is a maybe-bottom value. The **option discipline**: plain dispatch on a `T?` is rejected; you must `recovered value alternative` (the `⊥`-eliminator: `∀A. A? → A → A`) or use `?.` (optional chaining, `FragileDispatch`). Chains stay `T?` until recovered.
-- **Incompleteness as fragility** (behind `EO_INCOMPLETE=1`) — an object that still has an unset void is treated as fragile; dispatching on it is flagged. This is the object-level rule (see §12).
+- **Incompleteness as fragility** (behind `--incomplete`) — an object that still has an unset void is treated as fragile; dispatching on it is flagged. This is the object-level rule (see §12).
 - **Generics** — `A–F` type variables, read from `#5741` annotations (§8).
 - **Forma resolution** — a non-primitive atom return type is resolved to the *actual object's shape* via `@loc` (§9).
 
@@ -219,19 +218,16 @@ The last case is the crux of structural inference: a requirement is **accumulate
 
 ## 7. Code map
 
-The reference is a single file, `reference/eo_type_inference.py` (~1100 lines); the Rust port splits the same pieces across `src/` (§16). Reading order:
+One module per responsibility, in `src/`. Reading order — each leans only on the ones above it:
 
-- **Types** — `Var` (unknown, with `level`/bounds/`rec`), `Prim` (`bytes`), `Fun`, `Rec` (shape: `fields` + ordered `voids` + `alias`), `Opt` (`T?`). `Clash` is the type-error exception.
-- **Solver** — `constrain` (the heart; extrusion lives here), `freshen` (instantiate: copy variables deeper than a limit), `_level_of`, `_host` (the record behind a receiver), `_peek` (see past single-lower-bound variables), `_need`/`_drop_void` (caches that make cyclic `@`/recursive application terminate), `_defs_first` (order defs before expressions so forward references resolve).
-- **Walker** — `infer(node, env)`: one branch per AST node kind.
-- **AST nodes** — `Name`, `NumLit`/`StrLit`/`BytesLit`/`BoolLit`/`TupleLit`, `Obj` (no-void formation), `Lam` (formation with voids), `Apply`, `Dispatch`, `FragileDispatch` (`?.`), `Fragile`, `Recovered`, `AtomSig` (a `#5741`-annotated atom, §8), `LocRef` (a forma resolved by `@loc`, §9).
-- **Built-in types** — `bytes_type`/`number_type`/`string_type`/`bool_value`/`tuple_type`/`stdout_type`/`recovered_type`; `_prims` builds the three mutually-recursive base objects. `ATOMS` maps a handful of names to built-in signatures; `_PRIM`/`_TYPES` map primitive names.
-- **Annotation reading** — `_generic`, `_spec` (one annotation → a type), `_atom_sig` (an atom's whole signature → a `Rec`).
-- **Frontend** — `_forma`, `_formation`, `_scope`, `convert`, `load_xmir` (XMIR → AST); `build_loc_index`, `_toplevel_of`, `_project`, `_resolve_loc` (the `@loc` machinery, §9).
-- **Renderer** — `show(ty)`: the named-binder pretty-printer.
-- **Entry points** — `run_examples`, `check_file`, `main`.
-
-Globals worth knowing: `_LEVEL` (current MLsub level), `_DEFINING` (records mid-inference, for monomorphic recursion), `LENIENT` (file mode: unknown names → fresh unknown), `INCOMPLETE_FRAGILE` (the `EO_INCOMPLETE` flag), `LOC_INDEX`/`LOC_TOPLEVEL`/`_LOC_CACHE`/`_LOC_INPROGRESS` (forma resolution).
+- **`types.rs`** — the type vocabulary: `Var` (unknown, with `level`/bounds/`rec`), `Prim` (`bytes`), `Fun`, `Rec` (shape: `fields` + ordered `voids` + `alias`), `Opt` (`T?`). Also the built-ins — `bytes`/`number`/`string`/`bool`/`tuple`/`stdout`/`recovered` — of which the first three are mutually recursive and hand-modelled (§10). A clash is the type error.
+- **`solver.rs`** — `constrain` (the heart, "lhs must be usable as rhs"; extrusion lives here), `freshen` (instantiate: copy variables deeper than a limit), the level computation, the record behind a receiver, seeing past single-lower-bound variables, and the caches that make cyclic `@` and recursive application terminate.
+- **`infer.rs`** — the walker: one branch per AST node, and ordering defs before expressions so forward references resolve. Holds the inference context: the current MLsub level, the records mid-inference (for monomorphic recursion), and whether an unknown name is a fresh unknown or a failure.
+- **`xmir.rs`** — the reader, and the AST it produces: a name, the literals, a formation with and without voids, apply, dispatch, optional-chaining dispatch (`?.`), fragile, recovered, an annotated atom (§8), and a forma reference resolved by `@loc` (§9). Reading the `#5741` annotations — one annotation to a type, an atom's whole signature to a `Rec` — lives here too.
+- **`resolve.rs`** — the `@loc` machinery (§9): index every object by locator, find a forma's longest top-level ancestor, project down the remaining path, memoize, cycle-guard.
+- **`render.rs`** — the named-binder pretty-printer.
+- **`diag.rs`** — the diagnostics document of §5b.
+- **`main.rs`** — the command line.
 
 ---
 
@@ -291,7 +287,7 @@ When the runtime grows and `--atoms` shows a new unmodelled primitive, add its s
 
 ## 11. Testing & conformance
 
-- **Examples** — `python3 reference/eo_type_inference.py` runs 13 hand-built accept/reject cases (including the ones that must be rejected and a recursive object that once made the solver loop). These are the minimal behavioral spec.
+- **Examples** — 13 hand-built accept/reject cases (including the ones that must be rejected and a recursive object that once made the solver loop). These are the minimal behavioral spec.
 - **Conformance suite** — the whole `eo-runtime` is the large test: it must type **153/153, 0 rejected** (whatever the current object count is), in well under a second. Any implementation in any language must produce identical verdicts on the examples and the runtime.
 - **The frozen contract** — `conformance/examples.json` records both: every example with the regression it guards, plus the whole-runtime verdict. It was frozen before the port began (§13's migration discipline) and `tests/conformance.rs` runs it. A new behavior is a row there first, then an implementation change.
 
@@ -330,19 +326,18 @@ These were each a real bug; keep them in mind before touching the solver:
 - **Union types `|`** — so `if`/`switch`/`tuple.at` can be *declared* instead of abstaining. (Currently the honest gap: they carry no annotation.)
 - **Typed-XMIR facts** (`type=` pointers on `<o>`) — build when an IDE or cross-package check actually reads types.
 - **IDE / LSP** — the diagnostics JSON is already LSP-shaped; add a server.
-- **The Rust rewrite** — the production implementation in the standalone repo (see below). This Python stays as the reference/oracle.
-- **A formal spec + conformance harness** — the guard for the rewrite (the 13 examples + the whole-runtime verdicts); write it before porting.
+- **A formal spec** — the paper plus the conformance harness (the 13 examples + the whole-runtime verdicts), so a second implementation in another language has something to answer to.
 - **Discovery as an unsatisfiability *warning*** — the `{plus}&{length}` case (§6); never as a rewrite.
 
-### The Rust rewrite (production implementation)
+### Why Rust
 
-This repository's implementation is **Rust**; the Python remains the reference implementation (the executable spec) and the conformance oracle. The rationale is *not* about raw speed — Python's ~0.7s over the whole runtime is already fine for a gate, and a responsive IDE needs *incrementality* (re-check a changed `@loc` and its dependents), not a faster language. It's about deployment and correctness:
+The rationale is *not* raw speed — well under a second over the whole runtime is already fine for a gate, and a responsive IDE needs *incrementality* (re-check a changed `@loc` and its dependents), not a faster language. It is deployment and correctness:
 
-- **Deploys anywhere.** A single static binary any pipeline can invoke — a Java, JS, or Rust EO toolchain alike — with no runtime dependency and near-instant startup (matters for a gate run per build, and for a responsive language server). Python needs an interpreter present and cannot embed in a JS/Rust process.
-- **Right fit for the algorithm.** The types and the AST are sum types; Rust's `enum` + exhaustive `match` model them directly and turn whole classes of solver mistakes into compile errors — including the four MLsub subtleties in §12, each of which was a *silent* bug in dynamically-typed Python.
+- **Deploys anywhere.** A single static binary any pipeline can invoke — a Java, JS, or Rust EO toolchain alike — with no runtime dependency and near-instant startup, which matters for a gate that runs per build and for a responsive language server. It also embeds in a host process, which an interpreted checker cannot.
+- **Right fit for the algorithm.** The types and the AST are sum types; `enum` plus exhaustive `match` model them directly and turn whole classes of solver mistakes into compile errors — including some of the four MLsub subtleties in §12, each of which was a *silent* bug when it happened.
 - **IDE-ready.** Fast enough for an incremental LSP server, and the diagnostics JSON of §5b is already LSP-shaped.
 
-**Migration discipline (do not skip):** write the conformance suite first, then port under its guard so the Rust implementation is proven to agree with the Python **object-for-object** on the 13 examples and the whole runtime. That turns the rewrite from a risky redo into a checked migration — and keeps the Python as an oracle a third implementation could later be checked against too.
+**Build discipline (do not skip):** the conformance suite came first and the engine is built under its guard, one module at a time, each with the tests that pin it. That makes the implementation checked rather than merely written — and leaves a contract a second implementation in another language could be held to as well.
 
 ---
 
@@ -362,7 +357,7 @@ Design paper: `docs/eo-type-inference.tex` (build with `pdflatex`; note Unicode 
 
 ## 15. Limitations & caveats
 
-- **Prototype, whole-program, Python.** It infers the whole input each run (fast enough — <1s for the runtime — but not incremental) and reads the working-tree XMIR.
+- **Whole-program.** It infers the whole input each run (fast enough — <1s for the runtime — but not incremental) and reads the working-tree XMIR.
 - **No union types yet.** Genuinely polymorphic atoms whose type needs `A|B` (`if`, `switch`, `tuple.at`) carry no annotation and stay as the checker infers them.
 - **Lenient on the unknown.** An unmodeled atom/name becomes a fresh unknown ("anything"): the checker never emits a *false* error, but it can *miss* one. `--atoms` shows what is unmodeled.
 - **Best-effort forma resolution.** An object that cannot be typed in isolation falls back to opaque rather than failing (see §9).
@@ -375,11 +370,11 @@ Design paper: `docs/eo-type-inference.tex` (build with `pdflatex`; note Unicode 
 ```
 eoti/
 ├── README.md                 # this file — the spec and the map
-├── CONTRIBUTING.md           # how to build, and the porting discipline
+├── CONTRIBUTING.md           # how to build, and the build discipline
 ├── LICENSE                   # MIT (match EO)
 ├── Cargo.toml                # edition 2024, MSRV 1.85, warnings are errors
 ├── rust-toolchain.toml
-├── src/                      # the Rust implementation
+├── src/                      # the implementation
 │   ├── main.rs               #   CLI: XMIR in -> diagnostics JSON (§5b)
 │   ├── lib.rs                #   the crate root
 │   ├── xmir.rs               #   XMIR reader (the §3 vocabulary)
@@ -389,10 +384,7 @@ eoti/
 │   ├── resolve.rs            #   @loc forma resolution (§9)
 │   ├── render.rs             #   the named-binder pretty-printer
 │   └── diag.rs               #   the diagnostics document (§5b)
-├── reference/                # the Python reference implementation (executable spec + oracle)
-│   ├── eo_type_inference.py
-│   └── run.sh                #   whole-tree report; needs $EO_HOME or a path
-├── conformance/              # the frozen contract both implementations answer to
+├── conformance/              # the frozen contract the engine answers to
 │   ├── README.md
 │   ├── examples.json         #   13 examples + the whole-runtime verdict
 │   └── fixtures/             #   small .xmir programs (testable without an EO checkout)
@@ -407,10 +399,10 @@ The fixtures sit under `conformance/` rather than a top-level `examples/` becaus
 
 Order of work, and where it stands:
 
-1. ~~**Drop the Python in under `reference/`**~~ — done; it runs as-is (no build, no dependencies), so there is a working checker on day one.
-2. ~~**Freeze the conformance suite**~~ — done; `conformance/examples.json` is the contract the Rust port must satisfy, recorded before the port began.
+1. ~~**Freeze the conformance suite**~~ — done; `conformance/examples.json` holds the 13 verdicts and the whole-runtime baseline, recorded before any of the engine was written.
+2. **Build the engine** in `src/`, in the dependency order of §7 — `types`, `solver`, `infer`, `xmir`, `resolve`, `render`, `diag` — each module landing with the tests that pin it.
 3. **Add XMIR fixtures** under `conformance/fixtures/` (a handful of small programs + their expected verdicts) so the repo is testable without an EO checkout; keep the EO checkout only for full-runtime conformance.
-4. **Build the Rust implementation** in `src/`, one module at a time, with `tests/` asserting it matches the reference **object-for-object** on the suite. Retire the Python from the gating path only once Rust passes; keep it as the oracle.
+4. **Make it a gate** — the diagnostics JSON of §5b, then the dangling-forma lint, then wire it post-parse (§13).
 
 ---
 

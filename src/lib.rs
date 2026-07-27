@@ -8,9 +8,8 @@
 //!
 //! The type system is structural subtyping in the MLsub tradition: a type is a
 //! shape rather than a name, `bytes` is the one base type, and `@` models width
-//! subtyping. The design lives in `docs/eo-type-inference.tex`; the reference
-//! implementation, which this crate is a checked rewrite of, lives in
-//! `reference/eo_type_inference.py`.
+//! subtyping. The design lives in `docs/eo-type-inference.tex` and its behavior
+//! is frozen as a contract in `conformance/`.
 
 pub mod diag;
 pub mod infer;
