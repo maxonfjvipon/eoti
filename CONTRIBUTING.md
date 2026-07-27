@@ -34,8 +34,8 @@ that, and neither is negotiable:
 
 ## Dependencies
 
-Few, and each one justified. Today: `clap` for the command line, `serde_json`
-for the conformance contract in tests. Planned: `roxmltree` for reading XMIR
-and `serde` for emitting diagnostics. Nothing else without a reason worth
-writing down — a checker that ships as one static binary should not drag a
-dependency tree behind it.
+Few, and each one justified. Today: `roxmltree` for reading XMIR, `clap` for the
+command line, and `serde_json` for the conformance contract in tests. Planned:
+`serde` for emitting diagnostics. Nothing else without a reason worth writing
+down — a checker that ships as one static binary should not drag a dependency
+tree behind it.

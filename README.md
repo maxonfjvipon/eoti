@@ -7,7 +7,9 @@ A standalone, **structural type inferencer and pre-run type checker for EO**, op
 
 It reads the XMIR a program compiles to, infers a type for every object, and reports the mistakes that would otherwise only surface at runtime — for example, dispatching `.plus` on a `string`. It is deliberately **decoupled from any compiler**: it consumes only XMIR, so the same checker works no matter what language the EO compiler or runtime is written in.
 
-> **Status:** early. The type system is designed and settled (`docs/eo-type-inference.tex`), and its behavior is frozen as a contract in `conformance/` — 13 accept/reject cases plus a whole-runtime verdict of 153 objects with none rejected. The engine in `src/` is being built one module at a time against that contract; it is scaffolded but not yet wired, so the CLI does not check anything yet. Sections 3–12 describe the design the engine implements; §13 is what remains.
+> **Status:** working. It type-checks the entire `eo-runtime` — **153/153 top-level objects, 0 rejected** — in well under a second, passes all 13 accept/reject cases, and resolves every non-primitive atom return type to a real object shape. It is **not yet** wired into a build as a gate, and it prints a human-readable listing rather than the machine format of §5b. Those are the roadmap (§13).
+>
+> The type system itself is settled (`docs/eo-type-inference.tex`) and its behavior is frozen as a contract in `conformance/`, recorded before the engine existed. Sections 3–12 describe what the engine implements; §13 is what remains.
 
 ---
 
@@ -56,19 +58,19 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-The command-line interface below is the target shape (§5); the engine behind it
-is still being built, so today it only parses its arguments.
-
 ```bash
 # 1) Type-check XMIR files: one line per top-level object, its type or REJECT.
 eoti path/to/foo.xmir path/to/bar.xmir
 
-# 2) Machine-readable diagnostics for a build gate or an editor (§5b).
-eoti --json path/to/*.xmir
-
-# 3) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
+# 2) Diagnostic: which atoms are unmodelled (hit the lenient fallback)?
 eoti --atoms path/to/*.xmir
+
+# 3) The whole-runtime conformance test, against an EO checkout (§4).
+EO_HOME=/path/to/eo cargo test --test runtime
 ```
+
+There is no `--json` yet. The machine format of §5b is designed and not emitted;
+that is the next thing to build (§13).
 
 Flag:
 
@@ -132,8 +134,13 @@ Notes:
 
 ### 5a. Human-readable output
 
-- **stdout, per file:** a `== <path> ==` header, then one line per top-level object: `name : <type>` or `name : REJECT -- <reason>`.
-- **over a whole tree:** a Markdown report — summary table (objects / typed OK / rejected / incompleteness smells), grouped rejection reasons, the object-level smell list, and the full per-object listing.
+- **stdout, per file:** a `== <path> ==` header, then one line per top-level object: `name : <type>` or `name : REJECT -- <code> <detail>`.
+- **exit status:** `0` when nothing was rejected, `1` when something was, `2` when there was nothing to check.
+
+A rejection currently prints its stable code and its structured detail rather than
+a sentence, because the solver deliberately does not build prose (§12). Turning
+that detail into a message is part of §5b, and so is the summary report over a
+whole tree — neither is written yet.
 
 Types are rendered in **named-binder** form: variables named once, single-use ones inlined, the rest in a trailing `where` clause, open variables `∀`-quantified. Concrete positions are shown by their object name (e.g. `number`); positions resolved via `@loc` show the object's shape.
 
@@ -400,8 +407,8 @@ The fixtures sit under `conformance/` rather than a top-level `examples/` becaus
 Order of work, and where it stands:
 
 1. ~~**Freeze the conformance suite**~~ — done; `conformance/examples.json` holds the 13 verdicts and the whole-runtime baseline, recorded before any of the engine was written.
-2. **Build the engine** in `src/`, in the dependency order of §7 — `types`, `solver`, `infer`, `xmir`, `resolve`, `render`, `diag` — each module landing with the tests that pin it.
-3. **Add XMIR fixtures** under `conformance/fixtures/` (a handful of small programs + their expected verdicts) so the repo is testable without an EO checkout; keep the EO checkout only for full-runtime conformance.
+2. ~~**Build the engine**~~ — done; `types`, `solver`, `infer`, `xmir`, `resolve` and `render` all land, and the whole runtime types with nothing rejected.
+3. ~~**Add XMIR fixtures**~~ — done; `conformance/fixtures/` holds small programs whose filename states the verdict they must reach, so the repository is testable without an EO checkout.
 4. **Make it a gate** — the diagnostics JSON of §5b, then the dangling-forma lint, then wire it post-parse (§13).
 
 ---

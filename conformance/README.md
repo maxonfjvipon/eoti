@@ -18,7 +18,9 @@ Two parts:
   baseline. Requires an EO checkout; see §4 of the top-level README for
   generating one.
 - **`fixtures/`** — small XMIR programs so the repository is testable without an
-  EO checkout.
+  EO checkout. The filename states the verdict: an `accept-` file must type with
+  nothing rejected, a `reject-` file must reject. Keeping the expectation in the
+  name means a fixture cannot quietly drift away from what it was added to pin.
 
 Amending the contract is a deliberate act. A new behavior is a row here first,
 then an implementation change — never the other way round.

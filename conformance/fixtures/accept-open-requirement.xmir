@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- [x] > main / x.plus 1 > @ — the requirement stays open, because the world is -->
+<program name="accept-open-requirement">
+  <o name="main" loc="Φ.main" line="1">
+    <o base="∅" name="x" loc="Φ.main.x" line="1"/>
+    <o name="φ" base=".plus" loc="Φ.main.φ" line="2">
+      <o base="ξ.x" loc="Φ.main.φ.ρ" line="2"/>
+      <o base="Φ.number" as="α0" loc="Φ.main.φ.α0" line="2"/>
+    </o>
+  </o>
+</program>

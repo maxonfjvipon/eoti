@@ -50,6 +50,11 @@ pub enum Clash {
         /// What was wanted.
         wanted: TypeId,
     },
+    /// A name or a forma that stands for nothing the checker knows.
+    Unbound {
+        /// What could not be found.
+        name: String,
+    },
 }
 
 impl Clash {
@@ -62,6 +67,7 @@ impl Clash {
             Self::NotRecovered => "type/not-recovered",
             Self::IncompleteDispatch { .. } => "type/incomplete-dispatch",
             Self::NoAttributes { .. } | Self::Mismatch { .. } => "type/argument-mismatch",
+            Self::Unbound { .. } => "ref/dangling-forma",
         }
     }
 }
@@ -137,6 +143,19 @@ impl Solver {
             .level
             .shallower()
             .expect("already at the outermost level");
+    }
+
+    /// Go to a level, handing back the one just left. Used to build a starting
+    /// fact — an atom or a literal — at the outermost level, where it is fully
+    /// general and never needs lowering.
+    pub fn jump(&mut self, level: Level) -> Level {
+        std::mem::replace(&mut self.level, level)
+    }
+
+    /// Whether an object with an unset attribute counts as fragile.
+    #[must_use]
+    pub fn fragile(&self) -> bool {
+        self.fragile
     }
 
     /// `lhs` must be usable as `rhs`.
