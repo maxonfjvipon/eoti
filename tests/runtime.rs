@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use eoti::infer::{Engine, Env};
+use eoti::solver::Clash;
 use eoti::xmir;
 
 /// The `1-parse` tree of an EO checkout, if one was pointed at.
@@ -31,30 +32,40 @@ fn xmirs(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every object of the runtime, and whether it was rejected.
-fn checked(parsed: &Path) -> Vec<(String, bool)> {
-    eoti::deeply(|| walk(parsed))
+/// Every object of the runtime, and what the checker made of it. `fragile` turns
+/// on the object-level incompleteness pass.
+fn verdicts(parsed: &Path, fragile: bool) -> Vec<(String, Option<Clash>)> {
+    eoti::deeply(move || walk(parsed, fragile))
 }
 
-fn walk(parsed: &Path) -> Vec<(String, bool)> {
+fn walk(parsed: &Path, fragile: bool) -> Vec<(String, Option<Clash>)> {
     let mut paths = Vec::new();
     xmirs(parsed, &mut paths);
     paths.sort();
-    let mut engine = Engine::lenient(false);
+    let mut engine = Engine::lenient(fragile);
     engine.locs.learn(xmir::locators(&paths));
-    let mut verdicts = Vec::new();
+    let mut found = Vec::new();
     for path in &paths {
         let Ok(objects) = xmir::load(path) else {
             continue;
         };
         for (name, node) in objects {
-            verdicts.push((
+            found.push((
                 name.unwrap_or_else(|| "?".to_owned()),
-                engine.infer(&node, &Env::new()).is_err(),
+                engine.infer(&node, &Env::new()).err(),
             ));
         }
     }
-    verdicts
+    found
+}
+
+/// The objects whose failure would stop a build.
+fn refused(parsed: &Path, fragile: bool) -> Vec<String> {
+    verdicts(parsed, fragile)
+        .into_iter()
+        .filter(|(_, clash)| clash.as_ref().is_some_and(Clash::gates))
+        .map(|(name, _)| name)
+        .collect()
 }
 
 #[test]
@@ -63,13 +74,8 @@ fn rejects_nothing_of_the_whole_runtime() {
         eprintln!("skipped: point EO_HOME at an EO checkout to run the whole-runtime test");
         return;
     };
-    let rejected: Vec<String> = checked(&parsed)
-        .into_iter()
-        .filter(|(_, rejected)| *rejected)
-        .map(|(name, _)| name)
-        .collect();
     assert_eq!(
-        rejected,
+        refused(&parsed, false),
         Vec::<String>::new(),
         "the runtime dont type with nothing rejected"
     );
@@ -82,7 +88,23 @@ fn types_at_least_as_many_objects_as_the_contract_recorded() {
         return;
     };
     assert!(
-        checked(&parsed).len() >= 153,
+        verdicts(&parsed, false).len() >= 153,
         "the runtime dont hold at least the objects the contract recorded"
+    );
+}
+
+/// Looking for design smells may only ever add warnings. If the second pass
+/// could stop a build the first one let through, nobody could afford to run it —
+/// which is the whole reason it is a separate pass.
+#[test]
+fn stops_no_build_when_it_goes_looking_for_smells() {
+    let Some(parsed) = tree() else {
+        eprintln!("skipped: point EO_HOME at an EO checkout to run the whole-runtime test");
+        return;
+    };
+    assert_eq!(
+        refused(&parsed, true),
+        Vec::<String>::new(),
+        "looking for design smells dont leave a build it could have passed"
     );
 }

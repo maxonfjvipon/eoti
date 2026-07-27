@@ -11,11 +11,13 @@
 //! the receiver; bases are scope-qualified as `Φ.x`, `ξ.x` or `ξ.ρ.x`; and a
 //! literal is a primitive constructor applied to raw hex text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use roxmltree::{Document, Node as Elem};
+
+use crate::types::{Site, Spot};
 
 /// One node of the abstract syntax tree: the four moves, the literals, and the
 /// two failure forms.
@@ -65,7 +67,7 @@ pub enum Node {
         /// The attribute wanted.
         label: String,
         /// Where it was written.
-        line: Option<u32>,
+        site: Site,
     },
     /// Optional chaining: dispatch on a receiver that may be `⊥`, propagating
     /// that possibility rather than failing.
@@ -75,7 +77,7 @@ pub enum Node {
         /// The attribute wanted.
         label: String,
         /// Where it was written.
-        line: Option<u32>,
+        site: Site,
     },
     /// Mark a value as possibly `⊥`.
     Maybe(Box<Node>),
@@ -126,6 +128,15 @@ pub enum Trouble {
     Malformed(String),
 }
 
+impl std::fmt::Display for Trouble {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(what) => write!(out, "cannot read {what}"),
+            Self::Malformed(what) => write!(out, "cannot parse {what}"),
+        }
+    }
+}
+
 /// Every top-level object of one XMIR file, with the name it was given.
 ///
 /// # Errors
@@ -169,6 +180,145 @@ pub fn locators(paths: &[impl AsRef<Path>]) -> HashMap<String, Node> {
         }
     }
     found
+}
+
+/// A forma written somewhere, and where it was written. A forma is a locator
+/// into the object graph, so it can be checked against the graph without
+/// inferring anything.
+#[derive(Clone, Debug)]
+pub struct Forma {
+    /// The object it claims exists.
+    pub path: String,
+    /// Where the claim was made.
+    pub site: Site,
+}
+
+/// A forma that names nothing, and what it was probably meant to name.
+#[derive(Clone, Debug)]
+pub struct Broken {
+    /// The claim that cannot be resolved.
+    pub forma: Forma,
+    /// The object it would have named had it been rooted at the one declaring
+    /// it, when that names something real.
+    pub meant: Option<String>,
+}
+
+impl std::fmt::Display for Broken {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "forma `{}` names no object", self.forma.path)?;
+        match &self.meant {
+            Some(meant) => write!(out, ", though `{meant}` does"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Every locator that exists, and every forma that claims one.
+///
+/// This is all the dangling-forma lint needs, and it needs no inference at all:
+/// a forma naming an object that is not there is a broken reference whatever
+/// its type would have been.
+#[derive(Debug, Default)]
+pub struct Survey {
+    /// Every `@loc` in the input.
+    pub known: HashSet<String>,
+    /// Every forma claimed by an `atom`, `type` or `args` annotation.
+    pub claimed: Vec<Forma>,
+}
+
+impl Survey {
+    /// The formas that name nothing, of the ones the input can answer for.
+    ///
+    /// A forma whose object lives in a file nobody passed is unknown, not
+    /// broken, and stays quiet — the same leniency the walker shows an
+    /// unmodelled atom, and for the same reason: a checker that invents an
+    /// error is worse than one that misses it. What is left is the two shapes
+    /// the input really does answer for.
+    #[must_use]
+    pub fn dangling(&self) -> Vec<Broken> {
+        self.claimed
+            .iter()
+            .filter(|forma| !self.known.contains(&forma.path))
+            .filter_map(|forma| {
+                let meant = self.relative(forma);
+                (meant.is_some() || self.reaches(&forma.path)).then(|| Broken {
+                    forma: forma.clone(),
+                    meant,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether a forma reaches into an object the input carries: some ancestor
+    /// of it is right here, so the object it names would be here too.
+    fn reaches(&self, path: &str) -> bool {
+        let segments: Vec<&str> = path.split('.').collect();
+        (2..segments.len()).any(|cut| self.known.contains(&segments[..cut].join(".")))
+    }
+
+    /// The object a forma would have named had it been written relative to the
+    /// object declaring it: `Φ.return` inside `Φ.posix` meaning
+    /// `Φ.posix.return`. Nothing else explains a forma whose root is absent
+    /// while the very same tail sits under the object that claims it.
+    fn relative(&self, forma: &Forma) -> Option<String> {
+        let tail = forma.path.strip_prefix("Φ.")?;
+        let segments: Vec<&str> = forma.site.loc.as_deref()?.split('.').collect();
+        (2..=segments.len())
+            .map(|cut| format!("{}.{tail}", segments[..cut].join(".")))
+            .find(|under| self.known.contains(under))
+    }
+}
+
+/// Walk every object of every file, noting what exists and what is claimed.
+///
+/// Files that cannot be read are skipped, so one broken input does not stop the
+/// rest from being surveyed.
+pub fn survey(paths: &[impl AsRef<Path>]) -> Survey {
+    let mut found = Survey::default();
+    for path in paths {
+        let Ok(text) = fs::read_to_string(path.as_ref()) else {
+            continue;
+        };
+        let Ok(document) = Document::parse(&text) else {
+            continue;
+        };
+        glean(document.root_element(), &mut found);
+    }
+    found
+}
+
+/// Note what one document says exists and what it claims exists.
+fn glean(root: Elem, found: &mut Survey) {
+    for object in root.descendants().filter(|el| el.has_tag_name("o")) {
+        if let Some(loc) = object.attribute("loc") {
+            found.known.insert(loc.to_owned());
+        }
+        let here = site(object);
+        for annotation in ["atom", "type", "args"] {
+            let Some(text) = object.attribute(annotation) else {
+                continue;
+            };
+            for claim in text.split_whitespace() {
+                if let Some(path) = rooted(claim) {
+                    found.claimed.push(Forma {
+                        path,
+                        site: here.clone(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The object a single annotation claims, when it claims one at all. A generic
+/// letter names no object, nor does `⊥`, nor does anything that is not rooted
+/// at `Φ`.
+fn rooted(claim: &str) -> Option<String> {
+    let core = claim.strip_suffix('?').unwrap_or(claim);
+    if generic(core) || core == "⊥" || !core.starts_with("Φ.") {
+        return None;
+    }
+    Some(core.to_owned())
 }
 
 /// The last segment of a scope-qualified base: `Φ.bool` to `bool`, `ξ.ρ.if` to
@@ -226,17 +376,40 @@ fn forma(fqn: &str) -> Node {
 
 /// A self or parent relative path, dispatched segment by segment on `ξ`. `ρ` is
 /// the parent link, so `ξ.ρ.ρ.x` walks up twice, and `φ` is the decoratee.
-fn scope(base: &str, line: Option<u32>) -> Node {
+fn scope(base: &str, site: &Site) -> Node {
     let mut segments = base.split('.');
     let mut node = Node::Name(segments.next().unwrap_or("ξ").to_owned());
     for segment in segments {
         node = Node::Dispatch {
             obj: Box::new(node),
             label: if segment == "φ" { "@" } else { segment }.to_owned(),
-            line,
+            site: site.clone(),
         };
     }
     node
+}
+
+/// Where an element says it was written.
+fn site(el: Elem) -> Site {
+    Site {
+        at: el
+            .attribute("line")
+            .and_then(|text| text.parse().ok())
+            .map(|line| Spot {
+                line,
+                pos: el
+                    .attribute("pos")
+                    .and_then(|text| text.parse().ok())
+                    .unwrap_or(0),
+            }),
+        loc: el.attribute("loc").map(str::to_owned),
+    }
+}
+
+/// Whether a void states anything about itself: its own type, or the arguments
+/// its callback is handed.
+fn declares(el: Elem) -> bool {
+    el.attribute("type").is_some() || el.attribute("args").is_some()
 }
 
 /// Set an attribute, replacing whatever was bound under that name before.
@@ -250,10 +423,16 @@ fn bind(binds: &mut Vec<(String, Node)>, label: &str, node: Node) {
 
 /// A formation: either an atom that declares its whole type, or an object whose
 /// attributes get inferred.
+///
+/// An atom counts as fully declared once anything about it is written down that
+/// inference could not have worked out on its own: a return that quantifies, a
+/// void that states its own type, or a void that says what its callback is
+/// handed. Anything less and there is nothing to read, so the ordinary path
+/// types it from the return forma alone.
 fn formation(el: Elem) -> Node {
     let declared = elements(el).find_map(|child| child.attribute("atom"));
     if let Some(ret) = declared {
-        if generic(ret) || elements(el).any(|child| child.attribute("type").is_some()) {
+        if generic(ret) || elements(el).any(declares) {
             return Node::Atom {
                 voids: elements(el)
                     .filter(|child| child.attribute("base") == Some("∅"))
@@ -320,15 +499,15 @@ fn convert(el: Elem) -> Node {
             return literal;
         }
     }
-    let line = el.attribute("line").and_then(|text| text.parse().ok());
+    let here = site(el);
     let mut node = if base.starts_with('.') {
         Node::Dispatch {
             obj: Box::new(receiver.map_or(Node::Bytes, convert)),
             label: if name == "φ" { "@" } else { name }.to_owned(),
-            line,
+            site: here,
         }
     } else if base == "ξ" || base.starts_with("ξ.") {
-        scope(base, line)
+        scope(base, &here)
     } else {
         Node::Name(name.to_owned())
     };
@@ -368,10 +547,13 @@ mod tests {
 
     #[test]
     fn reads_a_dispatch_as_a_dispatch() {
-        let node = only(r#"<p><o base=".plus" line="7"><o base="Φ.number"/></o></p>"#);
+        let node = only(r#"<p><o base=".plus" line="7" loc="Φ.k.φ"><o base="Φ.number"/></o></p>"#);
         assert!(
-            matches!(node, Node::Dispatch { label, line, .. } if label == "plus" && line == Some(7)),
-            "a dispatch dont read back with its attribute and position"
+            matches!(node, Node::Dispatch { label, site, .. }
+                if label == "plus"
+                    && site.at.map(|at| at.line) == Some(7)
+                    && site.loc.as_deref() == Some("Φ.k.φ")),
+            "a dispatch dont read back with its attribute and where it was written"
         );
     }
 
@@ -418,6 +600,20 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_callbacks_argument_types_beside_a_concrete_return() {
+        let node = only(
+            r#"<p><o name="read"><o base="∅" name="offset"/>
+               <o base="∅" name="cant-read" args="Φ.string"/>
+               <o name="λ" atom="Φ.bytes"/></o></p>"#,
+        );
+        assert!(
+            matches!(node, Node::Atom { ref voids, .. }
+                if voids.iter().any(|void| matches!(&void.kind, Kind::Args(spec) if spec == "Φ.string"))),
+            "a callback void beside a concrete return dont keep its argument types"
+        );
+    }
+
+    #[test]
     fn skips_an_attribute_whose_name_marks_it_a_test() {
         let node = only(
             r#"<p><o name="k"><o name="+tests-thing" base="Φ.number"/>
@@ -443,6 +639,71 @@ mod tests {
         assert!(
             generic("C") && !generic("G"),
             "the letters that quantify dont stop at F"
+        );
+    }
+
+    /// One file's worth of survey, written out so a lint case reads as the XMIR
+    /// it is about rather than as a set of handles.
+    fn surveyed(xml: &str) -> super::Survey {
+        let mut found = super::Survey::default();
+        let document = Document::parse(xml).expect("the fixture is not well-formed");
+        super::glean(document.root_element(), &mut found);
+        found
+    }
+
+    #[test]
+    fn faults_a_forma_reaching_into_an_object_that_lacks_it() {
+        assert_eq!(
+            surveyed(
+                r#"<p><o name="posix" loc="Φ.posix"><o name="λ" atom="Φ.posix.nowhere"
+                   loc="Φ.posix.λ"/></o></p>"#
+            )
+            .dangling()
+            .first()
+            .map(|broken| broken.forma.path.clone()),
+            Some("Φ.posix.nowhere".to_owned()),
+            "a forma reaching into an object right here dont get faulted"
+        );
+    }
+
+    #[test]
+    fn says_what_a_forma_left_off_its_root_was_meant_to_name() {
+        assert_eq!(
+            surveyed(
+                r#"<p><o name="posix" loc="Φ.posix"><o name="return" loc="Φ.posix.return"/>
+                   <o name="λ" atom="Φ.return" loc="Φ.posix.λ"/></o></p>"#
+            )
+            .dangling()
+            .first()
+            .and_then(|broken| broken.meant.clone()),
+            Some("Φ.posix.return".to_owned()),
+            "a forma that dropped its root dont get told what it was meant to name"
+        );
+    }
+
+    #[test]
+    fn stays_quiet_about_a_forma_whose_file_nobody_passed() {
+        assert!(
+            surveyed(
+                r#"<p><o name="number" loc="Φ.number"><o name="λ" atom="Φ.bool"
+                   loc="Φ.number.λ"/></o></p>"#
+            )
+            .dangling()
+            .is_empty(),
+            "a forma naming an object from a file nobody passed dont go unaccused"
+        );
+    }
+
+    #[test]
+    fn takes_no_issue_with_a_forma_that_resolves() {
+        assert!(
+            surveyed(
+                r#"<p><o name="posix" loc="Φ.posix"><o name="return" loc="Φ.posix.return"/>
+                   <o name="λ" atom="Φ.posix.return" loc="Φ.posix.λ"/></o></p>"#
+            )
+            .dangling()
+            .is_empty(),
+            "a forma that names a real object dont pass the lint"
         );
     }
 }

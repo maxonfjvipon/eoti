@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  An atom declaring `cant /{Q.string}` is handed `[x] > x.plus 1`. The callback
+  is promised a string, and a string has no `plus`, so the handler cannot do
+  what it does with what it will be given. Reading `args=` on a void is what
+  makes this visible; without it the callback is a bare unknown that accepts
+  anything. See §8.
+-->
+<program name="reject-callback-argument-type">
+  <o name="main" loc="Φ.main" line="1">
+    <o name="chomp" loc="Φ.main.chomp" line="2">
+      <o base="∅" name="cant" args="Φ.string" loc="Φ.main.chomp.cant" line="3"/>
+      <o name="λ" atom="Φ.bytes" loc="Φ.main.chomp.λ" line="2"/>
+    </o>
+    <o name="φ" base="ξ.chomp" loc="Φ.main.φ" line="5">
+      <o as="α0" name="handler" loc="Φ.main.φ.α0" line="5">
+        <o base="∅" name="x" loc="Φ.main.φ.α0.x" line="5"/>
+        <o name="φ" base=".plus" loc="Φ.main.φ.α0.φ" line="6" pos="4">
+          <o base="ξ.x" loc="Φ.main.φ.α0.φ.ρ" line="6"/>
+          <o base="Φ.number" as="α0" loc="Φ.main.φ.α0.φ.α0" line="6"/>
+        </o>
+      </o>
+    </o>
+  </o>
+</program>

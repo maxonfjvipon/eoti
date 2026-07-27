@@ -1,12 +1,13 @@
 //! The command-line entry point: XMIR in, verdicts out.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+use eoti::diag::Findings;
 use eoti::infer::{Engine, Env};
-use eoti::render::show;
-use eoti::xmir;
+use eoti::render::{explain, show};
+use eoti::xmir::{self, Broken};
 
 /// What the checker was asked to look at.
 #[derive(Parser)]
@@ -19,6 +20,9 @@ struct Args {
     /// XMIR files to check, as EO's parser writes them into `1-parse`
     #[arg(value_name = "XMIR")]
     files: Vec<PathBuf>,
+    /// Emit the machine-readable diagnostics a build gates on
+    #[arg(long)]
+    json: bool,
     /// Report how often each unmodelled atom was reached, instead of checking
     #[arg(long)]
     atoms: bool,
@@ -35,6 +39,7 @@ fn main() -> ExitCode {
 fn check(args: Args) -> ExitCode {
     let Args {
         files,
+        json,
         atoms: only_atoms,
         incomplete,
     } = args;
@@ -48,33 +53,103 @@ fn check(args: Args) -> ExitCode {
         atoms(&mut engine, &files);
         return ExitCode::SUCCESS;
     }
-    let mut rejected = 0;
+    let mut findings = Findings::default();
+    let dangling = xmir::survey(&files).dangling();
+    for broken in &dangling {
+        findings.dangling(broken);
+    }
     for path in &files {
-        println!("== {} ==", path.display());
+        if !json {
+            println!("== {} ==", path.display());
+        }
         let objects = match xmir::load(path) {
             Ok(objects) => objects,
             Err(trouble) => {
-                println!("  (unreadable) {trouble:?}");
-                rejected += 1;
+                if !json {
+                    println!("  {trouble}");
+                }
+                findings.unreadable(&trouble);
                 continue;
             }
         };
         for (name, node) in objects {
             let name = name.unwrap_or_else(|| "?".to_owned());
             match engine.infer(&node, &Env::new()) {
-                Ok(ty) => println!("  {name} : {}", show(&engine.types, ty)),
+                Ok(ty) => {
+                    findings.typed();
+                    if !json {
+                        println!("  {name} : {}", show(&engine.types, ty));
+                    }
+                }
                 Err(clash) => {
-                    rejected += 1;
-                    println!("  {name} : REJECT -- {} {clash:?}", clash.code());
+                    if !json {
+                        println!(
+                            "  {name} : {} -- {}",
+                            if clash.gates() { "REJECT" } else { "WARN" },
+                            explain(&engine.types, &clash)
+                        );
+                    }
+                    findings.rejected(&engine.types, &clash);
                 }
             }
         }
     }
-    if rejected > 0 {
+    let (broken, refused, flagged) = (findings.errors(), findings.refused(), findings.flagged());
+    let report = findings.report(&common(&files));
+    if json {
+        println!("{}", report.json());
+    } else {
+        summarize(report.summary.objects, &dangling, refused, flagged);
+    }
+    if broken > 0 {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The last word of a human-readable run: the broken references, which sit under
+/// no object of their own, and then the counts.
+fn summarize(objects: usize, dangling: &[Broken], refused: usize, flagged: usize) {
+    println!();
+    for broken in dangling {
+        println!("  {broken}");
+    }
+    println!(
+        "{objects} object(s), {} typed, {refused} rejected{}",
+        objects - refused - flagged,
+        if flagged > 0 {
+            format!(", {flagged} flagged")
+        } else {
+            String::new()
+        }
+    );
+}
+
+/// The directory the inputs share, which is what a consumer means by the source
+/// of a report.
+fn common(files: &[PathBuf]) -> String {
+    let mut shared: Option<PathBuf> = None;
+    for path in files {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        shared = Some(match shared {
+            None => parent.to_path_buf(),
+            Some(known) => shorten(&known, parent),
+        });
+    }
+    shared.unwrap_or_default().display().to_string()
+}
+
+/// The longest prefix two directories share.
+fn shorten(known: &Path, other: &Path) -> PathBuf {
+    known
+        .components()
+        .zip(other.components())
+        .take_while(|(left, right)| left == right)
+        .map(|(left, _)| left)
+        .collect()
 }
 
 /// Which atoms hit the forgiving fallback, most frequent first.
