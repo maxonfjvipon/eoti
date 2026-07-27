@@ -224,25 +224,25 @@ impl Types {
     /// The same shape with its first void filled: one fewer slot, and the very
     /// same attributes, so whatever the original gains later is seen here too.
     ///
+    /// It keeps no origin. The result is a shape produced by applying, not one
+    /// anybody wrote, so it belongs to no definition level — and claiming one
+    /// would raise the limit that instantiation compares against, making a use
+    /// site share the formation it should have copied.
+    ///
     /// # Panics
     ///
     /// If the handle was not made by this arena, or the shape has no void left.
     pub fn applied(&mut self, rec: RecId) -> RecId {
-        let (fields, voids, alias, origin) = {
+        let (fields, voids, alias) = {
             let data = self.rec_at(rec);
             assert!(!data.voids.is_empty(), "the shape has no void left to fill");
-            (
-                data.fields,
-                data.voids[1..].to_vec(),
-                data.alias.clone(),
-                data.origin,
-            )
+            (data.fields, data.voids[1..].to_vec(), data.alias.clone())
         };
         self.hold(RecData {
             fields,
             voids,
             alias,
-            origin,
+            origin: Origin::default(),
         })
     }
 

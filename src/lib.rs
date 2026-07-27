@@ -18,3 +18,28 @@ pub mod resolve;
 pub mod solver;
 pub mod types;
 pub mod xmir;
+
+/// How much stack the checker is given to recurse in.
+const ROOM: usize = 256 * 1024 * 1024;
+
+/// Run something on a thread with room to recurse.
+///
+/// Constraining, instantiation and rendering all walk the type graph by
+/// following it, and a deep graph wants more stack than a thread is handed by
+/// default — two megabytes for a test thread, eight for a main one, either of
+/// which a large enough program will exhaust. Asking for the room up front turns
+/// a crash on somebody's big codebase into a limit nobody reaches.
+///
+/// # Panics
+///
+/// If the thread cannot be started, or the work panics.
+pub fn deeply<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(ROOM)
+            .spawn_scoped(scope, work)
+            .expect("cannot start a thread with room to recurse")
+            .join()
+            .expect("the checker gave up")
+    })
+}
