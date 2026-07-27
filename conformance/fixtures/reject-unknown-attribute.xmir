@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 42.length — a number has no `length`, and neither does the bytes it decorates -->
+<program name="reject-unknown-attribute">
+  <o name="main" loc="Φ.main" line="1">
+    <o name="φ" base=".length" loc="Φ.main.φ" line="2">
+      <o base="Φ.number" loc="Φ.main.φ.ρ" line="2"/>
+    </o>
+  </o>
+</program>

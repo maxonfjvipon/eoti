@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  unknown-thing.whatever — a global reference to something no built-in models.
+  It becomes a fresh unknown rather than an error, which is deliberate: the
+  checker must never turn an unmodelled atom into a false failure. See §15.
+  A plain `Φ.x` is not resolved by locator; only an `atom=` or `type=` forma is.
+-->
+<program name="accept-lenient-global">
+  <o name="main" loc="Φ.main" line="1">
+    <o name="φ" base=".whatever" loc="Φ.main.φ" line="2">
+      <o base="Φ.unknown-thing" loc="Φ.main.φ.ρ" line="2"/>
+    </o>
+  </o>
+</program>
